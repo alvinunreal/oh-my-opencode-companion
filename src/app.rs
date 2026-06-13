@@ -97,7 +97,8 @@ pub struct CompanionApp {
     screen: [f32; 2],
     position: String,
     has_modern_config: bool,
-    applied_layout: Option<(String, f32, u32, u32, String)>,
+    applied_size: Option<(String, f32, u32, u32)>,
+    applied_position: Option<(String, String)>,
 }
 
 impl CompanionApp {
@@ -131,7 +132,8 @@ impl CompanionApp {
             screen: primary_size(),
             position,
             has_modern_config,
-            applied_layout: None,
+            applied_size: None,
+            applied_position: None,
         }
     }
 
@@ -214,20 +216,24 @@ impl eframe::App for CompanionApp {
         let win_w = self.size * cols as f32;
         let win_h = self.size * rows as f32;
 
-        let layout = (
+        let size_layout = (
             session.session_id.clone(),
             self.size,
             cols as u32,
             rows as u32,
-            self.position.clone(),
         );
-        if self.applied_layout.as_ref() != Some(&layout) {
+        if self.applied_size.as_ref() != Some(&size_layout) {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
+            self.applied_size = Some(size_layout);
+        }
+
+        let position_layout = (session.session_id.clone(), self.position.clone());
+        if self.applied_position.as_ref() != Some(&position_layout) {
             let pos = self.initial_pos(win_w, win_h);
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
                 pos[0], pos[1],
             )));
-            self.applied_layout = Some(layout);
+            self.applied_position = Some(position_layout);
         }
 
         if ctx.input(|i| i.pointer.primary_down()) {
@@ -312,13 +318,18 @@ fn render_size_picker(ctx: &egui::Context) {
         return;
     }
 
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(MENU_OPEN_KEY), false));
+        return;
+    }
+
     let pos: [f32; 2] = ctx.data(|d| {
         d.get_temp(egui::Id::new(MENU_POS_KEY))
             .unwrap_or([20.0, 20.0])
     });
     let size: f32 = ctx.data(|d| d.get_temp(egui::Id::new(SIZE_KEY)).unwrap_or(DEFAULT_SIZE));
 
-    egui::Area::new(egui::Id::new("size_picker"))
+    let response = egui::Area::new(egui::Id::new("size_picker"))
         .fixed_pos(egui::pos2(pos[0], pos[1]))
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
@@ -380,6 +391,17 @@ fn render_size_picker(ctx: &egui::Context) {
                     }
                 });
         });
+
+    let clicked_outside = ctx.input(|i| {
+        (i.pointer.primary_released() || i.pointer.secondary_released())
+            && i.pointer
+                .interact_pos()
+                .map(|pos| !response.response.rect.contains(pos))
+                .unwrap_or(false)
+    });
+    if clicked_outside {
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(MENU_OPEN_KEY), false));
+    }
 }
 
 fn fit_text(ctx: &egui::Context, text: &str, font_id: &egui::FontId, max_width: f32) -> String {
@@ -459,7 +481,7 @@ mod tests {
     fn busy_wins_when_no_active_agents() {
         let sessions = vec![
             session("idle", "idle", &["intro"]),
-            session("busy", "busy", &["orchestrator"]),
+            session("busy", "busy", &[]),
         ];
         assert_eq!(choose_session(&sessions), Some(1));
     }
