@@ -87,6 +87,12 @@ fn choose_session(sessions: &[SessionInfo]) -> Option<usize> {
         .or_else(|| sessions.first().map(|_| 0))
 }
 
+fn clamp_viewport_pos(pos: egui::Pos2, win_w: f32, win_h: f32, screen: [f32; 2]) -> egui::Pos2 {
+    let x_max = (screen[0] - win_w - GAP).max(GAP);
+    let y_max = (screen[1] - win_h - GAP).max(GAP);
+    egui::pos2(pos.x.clamp(GAP, x_max), pos.y.clamp(GAP, y_max))
+}
+
 pub struct CompanionApp {
     state_path: std::path::PathBuf,
     sessions: Vec<SessionInfo>,
@@ -155,6 +161,14 @@ impl CompanionApp {
             .retain(|s| s.pid.map(is_pid_alive).unwrap_or(!has_modern));
     }
 
+    fn update_screen_from_ctx(&mut self, ctx: &egui::Context) {
+        if let Some(size) = ctx.input(|i| i.viewport().monitor_size) {
+            if 1.0 < size.x && 1.0 < size.y {
+                self.screen = [size.x, size.y];
+            }
+        }
+    }
+
     fn initial_pos(&self, win_w: f32, win_h: f32) -> [f32; 2] {
         let (x, y) = match self.position.as_str() {
             "bottom-left" => (GAP, self.screen[1] - win_h - GAP),
@@ -171,6 +185,7 @@ impl CompanionApp {
 impl eframe::App for CompanionApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
+        self.update_screen_from_ctx(ctx);
 
         let quit = ctx.data(|d| {
             d.get_temp::<bool>(egui::Id::new("companion_quit"))
@@ -223,7 +238,18 @@ impl eframe::App for CompanionApp {
             rows as u32,
         );
         if self.applied_size.as_ref() != Some(&size_layout) {
+            let old_outer_rect = ctx.input(|i| i.viewport().outer_rect);
+            let monitor_size = ctx.input(|i| i.viewport().monitor_size);
+            let screen = monitor_size
+                .filter(|size| 1.0 < size.x && 1.0 < size.y)
+                .map(|size| [size.x, size.y])
+                .unwrap_or(self.screen);
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
+            if let Some(rect) = old_outer_rect {
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(clamp_viewport_pos(
+                    rect.min, win_w, win_h, screen,
+                )));
+            }
             self.applied_size = Some(size_layout);
         }
 
