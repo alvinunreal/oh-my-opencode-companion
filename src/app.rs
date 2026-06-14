@@ -149,6 +149,14 @@ impl CompanionApp {
         self.positioned.retain(|id| live.contains(id));
     }
 
+    fn update_screen_from_ctx(&mut self, ctx: &egui::Context) {
+        if let Some(size) = ctx.input(|i| i.viewport().monitor_size) {
+            if 1.0 < size.x && 1.0 < size.y {
+                self.screen = [size.x, size.y];
+            }
+        }
+    }
+
     fn initial_pos(&self, index: usize, win_w: f32, win_h: f32) -> [f32; 2] {
         let slot = index as f32;
         let (x, y) = match self.position.as_str() {
@@ -183,6 +191,7 @@ impl CompanionApp {
 impl eframe::App for CompanionApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
+        self.update_screen_from_ctx(ctx);
 
         let quit = ctx.data(|d| {
             d.get_temp::<bool>(egui::Id::new("companion_quit"))
@@ -320,6 +329,11 @@ fn render_session_window(ctx: &egui::Context, session_id: &str, _size: f32, scre
     let current = (current_size as u32, cols as u32, rows as u32);
     if applied != current {
         let old_outer_rect = ctx.input(|i| i.viewport().outer_rect);
+        let monitor_size = ctx.input(|i| i.viewport().monitor_size);
+        let screen = monitor_size
+            .filter(|size| 1.0 < size.x && 1.0 < size.y)
+            .map(|size| [size.x, size.y])
+            .unwrap_or(screen);
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
         if let Some(rect) = old_outer_rect {
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(clamp_viewport_pos(
