@@ -72,6 +72,12 @@ fn cell_rects(agents: usize, cols: usize, rows: usize, cell: f32) -> Vec<egui::R
     rects
 }
 
+fn clamp_viewport_pos(pos: egui::Pos2, win_w: f32, win_h: f32, screen: [f32; 2]) -> egui::Pos2 {
+    let x_max = (screen[0] - win_w - GAP).max(GAP);
+    let y_max = (screen[1] - win_h - GAP).max(GAP);
+    egui::pos2(pos.x.clamp(GAP, x_max), pos.y.clamp(GAP, y_max))
+}
+
 pub struct CompanionApp {
     state_path: std::path::PathBuf,
     sessions: Vec<SessionInfo>,
@@ -161,7 +167,8 @@ impl CompanionApp {
                 let y = GAP;
                 (x, y)
             }
-            _ => { // "bottom-right"
+            _ => {
+                // "bottom-right"
                 let x = self.screen[0] - (win_w + GAP) * (slot + 1.0);
                 let y = self.screen[1] - win_h - GAP;
                 (x, y)
@@ -218,6 +225,7 @@ impl eframe::App for CompanionApp {
             let vid = egui::ViewportId::from_hash_of(&session.session_id);
             let sid = session.session_id.clone();
             let size = self.size;
+            let screen = self.screen;
 
             let agents: Vec<String> = if session.active_agents.is_empty() {
                 vec!["intro".to_string()]
@@ -247,7 +255,7 @@ impl eframe::App for CompanionApp {
             }
 
             ctx.show_viewport_deferred(vid, builder, move |ctx, _class| {
-                render_session_window(ctx, &sid, size);
+                render_session_window(ctx, &sid, size, screen);
             });
         }
 
@@ -255,8 +263,10 @@ impl eframe::App for CompanionApp {
         let menu_open: bool =
             ctx.data(|d| d.get_temp(egui::Id::new(MENU_OPEN_KEY)).unwrap_or(false));
         if menu_open {
-            let pos: [f32; 2] =
-                ctx.data(|d| d.get_temp(egui::Id::new(MENU_POS_KEY)).unwrap_or([200.0, 200.0]));
+            let pos: [f32; 2] = ctx.data(|d| {
+                d.get_temp(egui::Id::new(MENU_POS_KEY))
+                    .unwrap_or([200.0, 200.0])
+            });
 
             ctx.show_viewport_deferred(
                 egui::ViewportId::from_hash_of("size_picker"),
@@ -274,7 +284,7 @@ impl eframe::App for CompanionApp {
     }
 }
 
-fn render_session_window(ctx: &egui::Context, session_id: &str, _size: f32) {
+fn render_session_window(ctx: &egui::Context, session_id: &str, _size: f32, screen: [f32; 2]) {
     let sessions: SessionSnapshot =
         ctx.data(|d| d.get_temp(egui::Id::new(SESSIONS_KEY)).unwrap_or_default());
     let (_, cwd, agents, _) = sessions
@@ -309,7 +319,13 @@ fn render_session_window(ctx: &egui::Context, session_id: &str, _size: f32) {
     let applied: (u32, u32, u32) = ctx.data(|d| d.get_temp(layout_key).unwrap_or((0, 0, 0)));
     let current = (current_size as u32, cols as u32, rows as u32);
     if applied != current {
+        let old_outer_rect = ctx.input(|i| i.viewport().outer_rect);
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
+        if let Some(rect) = old_outer_rect {
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(clamp_viewport_pos(
+                rect.min, win_w, win_h, screen,
+            )));
+        }
         ctx.data_mut(|d| d.insert_temp(layout_key, current));
     }
 
@@ -345,17 +361,18 @@ fn render_session_window(ctx: &egui::Context, session_id: &str, _size: f32) {
 
             for (i, uri) in uris.iter().enumerate() {
                 if let Some(&cell) = rects.get(i) {
-                    ui.put(cell, egui::Image::new(uri).fit_to_exact_size(egui::vec2(current_size, current_size)));
+                    ui.put(
+                        cell,
+                        egui::Image::new(uri)
+                            .fit_to_exact_size(egui::vec2(current_size, current_size)),
+                    );
                 }
             }
 
             // Project label — overlaid on bottom strip of the window
             let label_h = (current_size * 0.15).clamp(13.0, 30.0);
             let font_size = (current_size * 0.09).clamp(9.0, 13.0);
-            let full_rect = egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(win_w, win_h),
-            );
+            let full_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(win_w, win_h));
             let strip = egui::Rect::from_min_size(
                 egui::pos2(0.0, win_h - label_h),
                 egui::vec2(win_w, label_h),
@@ -412,7 +429,10 @@ fn render_size_picker(ctx: &egui::Context) {
             for (label, preset) in SIZE_PRESETS {
                 let active = (size - preset).abs() < 0.5;
                 let text = if active {
-                    egui::RichText::new(*label).size(12.0).strong().color(egui::Color32::WHITE)
+                    egui::RichText::new(*label)
+                        .size(12.0)
+                        .strong()
+                        .color(egui::Color32::WHITE)
                 } else {
                     egui::RichText::new(*label)
                         .size(12.0)
