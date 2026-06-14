@@ -57,7 +57,7 @@ pub fn retry_move_current_window(
             continue;
         };
         if move_window(&socket, &id, delta).is_ok() {
-            continue;
+            return;
         }
     }
 }
