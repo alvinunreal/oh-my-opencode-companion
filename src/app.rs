@@ -102,11 +102,7 @@ fn normalized_loop_style(style: &str) -> &str {
 }
 
 fn normalized_speed(speed: f32) -> f32 {
-    if speed.is_finite() {
-        speed.clamp(0.25, 4.0)
-    } else {
-        1.0
-    }
+    crate::gifs::normalized_speed(speed)
 }
 
 fn apply_config(
@@ -128,7 +124,7 @@ fn apply_config(
         *size = DEFAULT_SIZE;
         *gif_pack = "default".to_string();
         *loop_style = "classic".to_string();
-        *speed = 1.0;
+        *speed = normalized_speed(f32::NAN);
     }
 }
 
@@ -299,7 +295,7 @@ impl CompanionApp {
         let mut position = "bottom-right".to_string();
         let mut gif_pack = "default".to_string();
         let mut loop_style = "classic".to_string();
-        let mut speed = 1.0;
+        let mut speed = normalized_speed(f32::NAN);
         let has_modern_config = state.config.is_some();
         let applied_config = config_key(state.config.as_ref());
         apply_config(
@@ -407,12 +403,13 @@ impl eframe::App for CompanionApp {
         }
 
         if !self.registered {
-            self.gifs.register(ctx);
+            self.gifs.register(ctx, self.speed);
             ctx.data_mut(|d| d.insert_temp(egui::Id::new(SIZE_KEY), self.size));
             self.registered = true;
         } else if config_changed {
             // Config/state changes are the source of truth. A right-click picker
             // selection remains local until the config tuple changes.
+            self.gifs.register(ctx, self.speed);
             ctx.data_mut(|d| d.insert_temp(egui::Id::new(SIZE_KEY), self.size));
         }
 
@@ -461,12 +458,12 @@ impl eframe::App for CompanionApp {
         let project_key = self.project_key_for(&session.cwd);
         let saved_position = self.window_positions.get(&project_key).copied();
         let agent_uris: Vec<String> = if session.active_agents.is_empty() {
-            vec![self.gifs.uri("intro", &self.gif_pack)]
+            vec![self.gifs.uri("intro", &self.gif_pack, self.speed)]
         } else {
             session
                 .active_agents
                 .iter()
-                .map(|agent| self.gifs.uri(agent, &self.gif_pack))
+                .map(|agent| self.gifs.uri(agent, &self.gif_pack, self.speed))
                 .collect()
         };
         let n = agent_uris.len().max(1);
@@ -559,10 +556,9 @@ impl eframe::App for CompanionApp {
             )
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-                // egui_extras' GIF image loader controls playback from the GIF
-                // bytes, so speed and loopStyle are currently plumbed through
-                // state for future support but not applied at render time.
-                let _speed = self.speed;
+                // Speed is applied by registering GIF bytes with scaled frame
+                // delays. loopStyle is still reserved for future playback
+                // behavior that is independent from the selected GIF pack.
                 let _loop_style = &self.loop_style;
                 render_session(ui, ctx, &session, &agent_uris, self.size, win_w, win_h);
             });
@@ -831,12 +827,12 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_first_retained_session() {
+    fn falls_back_to_newest_retained_session() {
         let sessions = vec![
             session("first", "idle", &["intro"]),
             session("second", "idle", &["intro"]),
         ];
-        assert_eq!(choose_session(&sessions), Some(0));
+        assert_eq!(choose_session(&sessions), Some(1));
     }
 
     #[test]
@@ -995,12 +991,18 @@ mod tests {
             enabled: true,
             position: "top-left".into(),
             size: "large".into(),
+            gif_pack: "default".into(),
+            loop_style: "classic".into(),
+            speed: 1.5,
         };
         assert_eq!(
             config_key(Some(&cfg)),
             Some(ConfigKey {
                 position: "top-left".into(),
                 size: "large".into(),
+                gif_pack: "default".into(),
+                loop_style: "classic".into(),
+                speed_bits: 1.5f32.to_bits(),
             })
         );
         assert_eq!(config_key(None), None);
@@ -1011,18 +1013,30 @@ mod tests {
         let previous = Some(ConfigKey {
             position: "bottom-right".into(),
             size: "medium".into(),
+            gif_pack: "default".into(),
+            loop_style: "classic".into(),
+            speed_bits: 1.5f32.to_bits(),
         });
         let unchanged = Some(ConfigKey {
             position: "bottom-right".into(),
             size: "medium".into(),
+            gif_pack: "default".into(),
+            loop_style: "classic".into(),
+            speed_bits: 1.5f32.to_bits(),
         });
         let moved = Some(ConfigKey {
             position: "top-left".into(),
             size: "medium".into(),
+            gif_pack: "default".into(),
+            loop_style: "classic".into(),
+            speed_bits: 1.5f32.to_bits(),
         });
         let resized = Some(ConfigKey {
             position: "bottom-right".into(),
             size: "large".into(),
+            gif_pack: "default".into(),
+            loop_style: "classic".into(),
+            speed_bits: 1.5f32.to_bits(),
         });
 
         assert_eq!(previous, unchanged);
@@ -1034,17 +1048,43 @@ mod tests {
     fn apply_config_updates_size_only_for_config_changes() {
         let mut position = "bottom-right".to_string();
         let mut size = 200.0;
+        let mut gif_pack = "default".to_string();
+        let mut loop_style = "classic".to_string();
+        let mut speed = 1.0;
         let cfg = ConfigKey {
             position: "top-left".into(),
             size: "small".into(),
+            gif_pack: "default".into(),
+            loop_style: "smooth".into(),
+            speed_bits: 2.0f32.to_bits(),
         };
 
-        apply_config(Some(&cfg), &mut position, &mut size);
+        apply_config(
+            Some(&cfg),
+            &mut position,
+            &mut size,
+            &mut gif_pack,
+            &mut loop_style,
+            &mut speed,
+        );
         assert_eq!(position, "top-left");
         assert_eq!(size, 80.0);
+        assert_eq!(gif_pack, "default");
+        assert_eq!(loop_style, "smooth");
+        assert_eq!(speed, 2.0);
 
-        apply_config(None, &mut position, &mut size);
+        apply_config(
+            None,
+            &mut position,
+            &mut size,
+            &mut gif_pack,
+            &mut loop_style,
+            &mut speed,
+        );
         assert_eq!(position, "bottom-right");
         assert_eq!(size, 120.0);
+        assert_eq!(gif_pack, "default");
+        assert_eq!(loop_style, "classic");
+        assert_eq!(speed, 1.5);
     }
 }

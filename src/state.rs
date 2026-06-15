@@ -28,7 +28,7 @@ fn default_loop_style() -> String {
 }
 
 fn default_speed() -> f32 {
-    1.0
+    1.5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
