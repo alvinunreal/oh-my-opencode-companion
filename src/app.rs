@@ -10,7 +10,10 @@ use eframe::egui;
 use crate::gifs::Gifs;
 use crate::niri;
 use crate::screen::primary_size;
-use crate::state::{read_state, start_watcher, CompanionConfigState, SessionInfo};
+use crate::state::{
+    read_state, start_watcher, write_project_window_position, CompanionConfigState, SessionInfo,
+    WindowPositionState,
+};
 
 const DEFAULT_SIZE: f32 = 120.0;
 const GAP: f32 = 10.0;
@@ -29,7 +32,10 @@ const MENU_POS_KEY: &str = "companion_menu_pos";
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WindowGeometryKey {
     session_id: String,
+    project_key: String,
     position: String,
+    custom_x: Option<i32>,
+    custom_y: Option<i32>,
     size_px: u32,
     cols: u32,
     rows: u32,
@@ -103,6 +109,20 @@ pub(crate) fn place_window(position: &str, screen: [f32; 2], win: [f32; 2]) -> [
     [x.clamp(GAP, x_max), y.clamp(GAP, y_max)]
 }
 
+fn clamp_window_position(pos: [f32; 2], screen: [f32; 2], win: [f32; 2]) -> [f32; 2] {
+    let x_max = (screen[0] - win[0] - GAP).max(GAP);
+    let y_max = (screen[1] - win[1] - GAP).max(GAP);
+    [pos[0].clamp(GAP, x_max), pos[1].clamp(GAP, y_max)]
+}
+
+fn project_key(cwd: &str) -> String {
+    std::path::Path::new(cwd)
+        .canonicalize()
+        .ok()
+        .and_then(|path| path.to_str().map(str::to_string))
+        .unwrap_or_else(|| cwd.to_string())
+}
+
 fn cell_rects(agents: usize, cols: usize, rows: usize, cell: f32) -> Vec<egui::Rect> {
     let mut rects = Vec::with_capacity(agents);
     let full_rows = agents / cols;
@@ -166,6 +186,8 @@ pub struct CompanionApp {
     has_modern_config: bool,
     applied_config: Option<ConfigKey>,
     applied_geometry: Option<WindowGeometryKey>,
+    window_positions: std::collections::BTreeMap<String, WindowPositionState>,
+    drag_project_key: Option<String>,
     niri_generation: Arc<AtomicU64>,
 }
 
@@ -174,6 +196,7 @@ impl CompanionApp {
         let state_path = crate::state::state_file_path();
         let state = read_state(&state_path);
         let sessions = state.sessions;
+        let window_positions = state.window_positions;
 
         let mut initial_size = DEFAULT_SIZE;
         let mut position = "bottom-right".to_string();
@@ -195,6 +218,8 @@ impl CompanionApp {
             has_modern_config,
             applied_config,
             applied_geometry: None,
+            window_positions,
+            drag_project_key: None,
             niri_generation: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -204,6 +229,7 @@ impl CompanionApp {
             while self.rx.try_recv().is_ok() {}
             let state = read_state(&self.state_path);
             self.sessions = state.sessions;
+            self.window_positions = state.window_positions;
             self.has_modern_config = state.config.is_some();
             let next_config = config_key(state.config.as_ref());
             let config_changed = self.applied_config != next_config;
@@ -268,6 +294,8 @@ impl eframe::App for CompanionApp {
         };
 
         let session = self.sessions[selected_idx].clone();
+        let project_key = project_key(&session.cwd);
+        let saved_position = self.window_positions.get(&project_key).copied();
         let agent_uris: Vec<String> = if session.active_agents.is_empty() {
             vec![self.gifs.uri("intro")]
         } else {
@@ -283,7 +311,10 @@ impl eframe::App for CompanionApp {
 
         let geometry = WindowGeometryKey {
             session_id: session.session_id.clone(),
+            project_key: project_key.clone(),
             position: self.position.clone(),
+            custom_x: saved_position.map(|pos| pos.x.round() as i32),
+            custom_y: saved_position.map(|pos| pos.y.round() as i32),
             size_px: self.size.round() as u32,
             cols: cols as u32,
             rows: rows as u32,
@@ -292,16 +323,41 @@ impl eframe::App for CompanionApp {
         };
         if self.applied_geometry.as_ref() != Some(&geometry) {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
-            let pos = place_window(&self.position, self.screen, [win_w, win_h]);
+            let pos = saved_position
+                .map(|pos| clamp_window_position([pos.x, pos.y], self.screen, [win_w, win_h]))
+                .unwrap_or_else(|| place_window(&self.position, self.screen, [win_w, win_h]));
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
                 pos[0], pos[1],
             )));
             self.applied_geometry = Some(geometry);
-            self.spawn_niri_fallback([win_w, win_h]);
+            self.spawn_niri_fallback([win_w, win_h], saved_position);
         }
 
-        if ctx.input(|i| i.pointer.primary_down()) {
+        let menu_open = ctx.data(|d| {
+            d.get_temp::<bool>(egui::Id::new(MENU_OPEN_KEY))
+                .unwrap_or(false)
+        });
+        if !menu_open && ctx.input(|i| i.pointer.primary_pressed()) {
+            self.drag_project_key = Some(project_key.clone());
+        }
+        if self.drag_project_key.is_some() && ctx.input(|i| i.pointer.primary_down()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+        if ctx.input(|i| i.pointer.primary_released()) {
+            if let Some(project_key) = self.drag_project_key.take() {
+                if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
+                    let position = WindowPositionState {
+                        x: rect.min.x,
+                        y: rect.min.y,
+                    };
+                    if write_project_window_position(&self.state_path, &project_key, position)
+                        .is_ok()
+                    {
+                        self.window_positions.insert(project_key, position);
+                        self.applied_geometry = None;
+                    }
+                }
+            }
         }
 
         if ctx.input(|i| i.pointer.secondary_released()) {
@@ -329,17 +385,20 @@ impl eframe::App for CompanionApp {
 }
 
 impl CompanionApp {
-    fn spawn_niri_fallback(&self, win_size: [f32; 2]) {
+    fn spawn_niri_fallback(&self, win_size: [f32; 2], saved_position: Option<WindowPositionState>) {
         let socket = match std::env::var("NIRI_SOCKET") {
             Ok(socket) if !socket.is_empty() => socket,
             _ => return,
         };
-        let desired = place_window(&self.position, self.screen, win_size);
+        let desired = saved_position
+            .map(|pos| clamp_window_position([pos.x, pos.y], self.screen, win_size))
+            .unwrap_or_else(|| place_window(&self.position, self.screen, win_size));
         if !desired[0].is_finite() || !desired[1].is_finite() {
             return;
         }
         let generation = self.niri_generation.fetch_add(1, Ordering::Relaxed) + 1;
         let position = self.position.clone();
+        let target_position = saved_position.map(|pos| [pos.x, pos.y]);
         let screen = self.screen;
         let niri_generation = Arc::clone(&self.niri_generation);
         std::thread::spawn(move || {
@@ -349,6 +408,7 @@ impl CompanionApp {
                 generation,
                 niri_generation,
                 position,
+                target_position,
                 screen,
                 win_size,
             );
@@ -652,7 +712,10 @@ mod tests {
     fn geometry_key_changes_with_layout_inputs() {
         let base = WindowGeometryKey {
             session_id: "a".into(),
+            project_key: "/a".into(),
             position: "bottom-right".into(),
+            custom_x: None,
+            custom_y: None,
             size_px: 120,
             cols: 1,
             rows: 1,

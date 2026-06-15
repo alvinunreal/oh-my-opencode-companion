@@ -45,6 +45,7 @@ pub fn retry_move_current_window(
     generation: u64,
     current_generation: Arc<AtomicU64>,
     position: String,
+    target_position: Option<[f32; 2]>,
     screen: [f32; 2],
     win_size: [f32; 2],
 ) {
@@ -53,7 +54,9 @@ pub fn retry_move_current_window(
         if current_generation.load(Ordering::Relaxed) != generation {
             return;
         }
-        let Some((id, delta)) = resolve_move(&socket, pid, &position, screen, win_size) else {
+        let Some((id, delta)) =
+            resolve_move(&socket, pid, &position, target_position, screen, win_size)
+        else {
             continue;
         };
         if move_window(&socket, &id, delta).is_ok() {
@@ -66,6 +69,7 @@ fn resolve_move(
     socket: &str,
     pid: u32,
     position: &str,
+    target_position: Option<[f32; 2]>,
     screen: [f32; 2],
     win_size: [f32; 2],
 ) -> Option<(String, [i32; 2])> {
@@ -96,6 +100,7 @@ fn resolve_move(
         outputs_json,
         pid,
         position,
+        target_position,
         screen,
         win_size,
     )
@@ -106,6 +111,7 @@ fn resolve_move_from_json(
     outputs_json: Option<&[u8]>,
     pid: u32,
     position: &str,
+    target_position: Option<[f32; 2]>,
     screen: [f32; 2],
     win_size: [f32; 2],
 ) -> Option<(String, [i32; 2])> {
@@ -121,8 +127,17 @@ fn resolve_move_from_json(
             width: screen[0] as f64,
             height: screen[1] as f64,
         });
-    let desired =
-        place_window_on_output(position, output, [win_size[0] as f64, win_size[1] as f64]);
+    let desired = target_position
+        .map(|pos| {
+            clamp_position_on_output(
+                [pos[0] as f64, pos[1] as f64],
+                output,
+                [win_size[0] as f64, win_size[1] as f64],
+            )
+        })
+        .unwrap_or_else(|| {
+            place_window_on_output(position, output, [win_size[0] as f64, win_size[1] as f64])
+        });
     let dx = (desired[0] - current[0]).round() as i32;
     let dy = (desired[1] - current[1]).round() as i32;
     if dx.abs() <= 1 && dy.abs() <= 1 {
@@ -192,6 +207,21 @@ fn place_window_on_output(
     [x.clamp(x_min, x_max), y.clamp(y_min, y_max)]
 }
 
+fn clamp_position_on_output(
+    position: [f64; 2],
+    output: NiriOutputLogical,
+    win_size: [f64; 2],
+) -> [f64; 2] {
+    let x_min = output.x + GAP;
+    let y_min = output.y + GAP;
+    let x_max = (output.x + output.width - win_size[0] - GAP).max(x_min);
+    let y_max = (output.y + output.height - win_size[1] - GAP).max(y_min);
+    [
+        position[0].clamp(x_min, x_max),
+        position[1].clamp(y_min, y_max),
+    ]
+}
+
 fn matches_window(win: &NiriWindow, pid: u32) -> bool {
     win.pid == Some(pid)
         && win.is_floating == Some(true)
@@ -232,8 +262,9 @@ fn format_delta(delta: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_move_args, matches_window, output_for_position, parse_outputs,
-        place_window_on_output, resolve_move_from_json, NiriOutputLogical, NiriWindow,
+        build_move_args, clamp_position_on_output, matches_window, output_for_position,
+        parse_outputs, place_window_on_output, resolve_move_from_json, NiriOutputLogical,
+        NiriWindow,
     };
 
     const FIXTURE: &str = r#"[
@@ -374,6 +405,7 @@ mod tests {
                 Some(OUTPUTS.as_bytes()),
                 1234,
                 "bottom-right",
+                None,
                 [2550.0, 1100.0],
                 [360.0, 240.0],
             ),
@@ -395,6 +427,7 @@ mod tests {
                 Some(outputs.as_bytes()),
                 1234,
                 "top-left",
+                None,
                 [10000.0, 5000.0],
                 [120.0, 120.0],
             ),
@@ -413,6 +446,20 @@ mod tests {
         assert_eq!(
             place_window_on_output("bottom-right", output, [120.0, 120.0]),
             [3070.0, 690.0]
+        );
+    }
+
+    #[test]
+    fn custom_position_is_clamped_to_output() {
+        let output = NiriOutputLogical {
+            x: 0.0,
+            y: 0.0,
+            width: 500.0,
+            height: 300.0,
+        };
+        assert_eq!(
+            clamp_position_on_output([460.0, -20.0], output, [120.0, 120.0]),
+            [370.0, 10.0]
         );
     }
 
