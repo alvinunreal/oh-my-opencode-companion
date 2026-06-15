@@ -451,7 +451,7 @@ impl eframe::App for CompanionApp {
                 return;
             }
             egui::CentralPanel::default()
-                .frame(egui::Frame::none().fill(egui::Color32::TRANSPARENT))
+                .frame(egui::Frame::none().fill(egui::Color32::BLACK))
                 .show(ctx, |ui| {
                     ui.centered_and_justified(|ui| {
                         ui.label("No active sessions");
@@ -594,15 +594,11 @@ impl eframe::App for CompanionApp {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::none()
-                    .fill(egui::Color32::TRANSPARENT)
+                    .fill(egui::Color32::BLACK)
                     .inner_margin(egui::Margin::ZERO),
             )
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-                // Speed is applied by registering GIF bytes with scaled frame
-                // delays. loopStyle is still reserved for future playback
-                // behavior that is independent from the selected GIF pack.
-                let _loop_style = &self.loop_style;
                 render_session(ui, ctx, &session, &agent_frames, self.size, win_w, win_h);
             });
 

@@ -39,7 +39,7 @@ fn main() -> eframe::Result {
             .with_title("oh-my-opencode-slim-companion")
             .with_app_id("oh-my-opencode-slim-companion")
             .with_decorations(false)
-            .with_transparent(true)
+            .with_transparent(false)
             .with_always_on_top()
             .with_active(false)
             .with_inner_size([120.0, 120.0]),
