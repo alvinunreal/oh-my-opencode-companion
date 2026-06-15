@@ -28,8 +28,8 @@ impl Gifs {
         }
     }
 
-    pub fn uri(&self, agent: &str) -> String {
-        let name = if self.map.contains_key(agent) {
+    pub fn uri(&self, agent: &str, gif_pack: &str) -> String {
+        let name = if gif_pack == "default" && self.map.contains_key(agent) {
             agent
         } else {
             "orchestrator"
