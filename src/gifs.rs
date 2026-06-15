@@ -1,7 +1,8 @@
 use egui::{ColorImage, Context, Rect, TextureHandle, TextureId, TextureOptions};
 use std::collections::HashMap;
 
-const DEFAULT_SPEED: f32 = 1.5;
+const DEFAULT_SPEED: f32 = 1.0;
+const BASE_SPEED_MULTIPLIER: f32 = 2.0;
 const FRAME_RATE: f32 = 24.0;
 const FRAME_COUNT: usize = 72;
 const SHEET_COLS: usize = 12;
@@ -40,52 +41,61 @@ impl Gifs {
         }
     }
 
-    pub fn register(&mut self, ctx: &Context) {
-        for (name, bytes) in &self.sheets {
-            if self.textures.contains_key(name) {
-                continue;
-            }
-            let started = std::time::Instant::now();
-            match decode_sprite_sheet(bytes) {
-                Ok(image) => {
-                    let texture = ctx.load_texture(
-                        format!("companion-animation-{name}"),
-                        image,
-                        TextureOptions::LINEAR,
-                    );
-                    crate::log::debug(format!(
-                        "animation register name={} bytes={} elapsed_ms={}",
-                        name,
-                        bytes.len(),
-                        started.elapsed().as_millis()
-                    ));
-                    self.textures.insert(name, texture);
-                }
-                Err(err) => {
-                    crate::log::debug(format!("animation decode failed name={} err={}", name, err));
-                }
-            }
-        }
-    }
-
     pub fn frame(
-        &self,
+        &mut self,
+        ctx: &Context,
         agent: &str,
         gif_pack: &str,
         speed: f32,
         loop_style: &str,
         time_seconds: f64,
     ) -> Option<AnimationFrame> {
-        let name = if gif_pack == "default" && self.textures.contains_key(agent) {
-            agent
-        } else {
-            "orchestrator"
-        };
+        let name = self.resolve_name(agent, gif_pack);
+        self.ensure_texture(ctx, name)?;
         let texture = self.textures.get(name)?;
         Some(AnimationFrame {
             texture_id: texture.id(),
             uv: frame_uv(frame_index(time_seconds, speed, loop_style)),
         })
+    }
+
+    fn ensure_texture(&mut self, ctx: &Context, name: &'static str) -> Option<()> {
+        if self.textures.contains_key(name) {
+            return Some(());
+        }
+        let bytes = *self.sheets.get(name)?;
+        let started = std::time::Instant::now();
+        match decode_sprite_sheet(bytes) {
+            Ok(image) => {
+                let texture = ctx.load_texture(
+                    format!("companion-animation-{name}"),
+                    image,
+                    TextureOptions::LINEAR,
+                );
+                crate::log::debug(format!(
+                    "animation lazy-load name={} bytes={} elapsed_ms={}",
+                    name,
+                    bytes.len(),
+                    started.elapsed().as_millis()
+                ));
+                self.textures.insert(name, texture);
+                Some(())
+            }
+            Err(err) => {
+                crate::log::debug(format!("animation decode failed name={} err={}", name, err));
+                None
+            }
+        }
+    }
+
+    fn resolve_name(&self, agent: &str, gif_pack: &str) -> &'static str {
+        if gif_pack != "default" {
+            return "orchestrator";
+        }
+        self.sheets
+            .get_key_value(agent)
+            .map(|(name, _)| *name)
+            .unwrap_or("orchestrator")
     }
 }
 
@@ -106,8 +116,9 @@ fn normalized_loop_style(loop_style: &str) -> &str {
 }
 
 fn frame_index(time_seconds: f64, speed: f32, loop_style: &str) -> usize {
-    let tick = (time_seconds.max(0.0) * FRAME_RATE as f64 * normalized_speed(speed) as f64).floor()
-        as usize;
+    let effective_speed = normalized_speed(speed) * BASE_SPEED_MULTIPLIER;
+    let tick =
+        (time_seconds.max(0.0) * FRAME_RATE as f64 * effective_speed as f64).floor() as usize;
     if normalized_loop_style(loop_style) == "smooth" {
         let period = FRAME_COUNT * 2 - 2;
         let phase = tick % period;
@@ -144,7 +155,7 @@ mod tests {
 
     #[test]
     fn speed_is_clamped_and_defaults_fast() {
-        assert_eq!(normalized_speed(f32::NAN), 1.5);
+        assert_eq!(normalized_speed(f32::NAN), 1.0);
         assert_eq!(normalized_speed(0.1), 0.25);
         assert_eq!(normalized_speed(9.0), 4.0);
     }
@@ -152,18 +163,18 @@ mod tests {
     #[test]
     fn classic_loop_wraps_forward() {
         assert_eq!(frame_index(0.0, 1.0, "classic"), 0);
-        assert_eq!(frame_index(3.0, 1.0, "classic"), 0);
-        assert_eq!(frame_index(3.0 + 1.0 / 24.0, 1.0, "classic"), 1);
+        assert_eq!(frame_index(1.5, 1.0, "classic"), 0);
+        assert_eq!(frame_index(1.5 + 1.0 / 48.0, 1.0, "classic"), 1);
     }
 
     #[test]
     fn smooth_loop_ping_pongs_without_duplicate_endpoints() {
         assert_eq!(frame_index(0.0, 1.0, "smooth"), 0);
         assert_eq!(
-            frame_index((FRAME_COUNT - 1) as f64 / 24.0, 1.0, "smooth"),
+            frame_index((FRAME_COUNT - 1) as f64 / 48.0, 1.0, "smooth"),
             71
         );
-        assert_eq!(frame_index(FRAME_COUNT as f64 / 24.0, 1.0, "smooth"), 70);
+        assert_eq!(frame_index(FRAME_COUNT as f64 / 48.0, 1.0, "smooth"), 70);
     }
 
     #[test]

@@ -87,6 +87,21 @@ fn config_key(config: Option<&CompanionConfigState>) -> Option<ConfigKey> {
     })
 }
 
+fn config_for_owner<'a>(
+    sessions: &'a [SessionInfo],
+    owner_session_id: Option<&str>,
+    global_config: Option<&'a CompanionConfigState>,
+) -> Option<&'a CompanionConfigState> {
+    owner_session_id
+        .and_then(|owner| {
+            sessions
+                .iter()
+                .find(|session| session.session_id == owner)
+                .and_then(|session| session.config.as_ref())
+        })
+        .or(global_config)
+}
+
 fn normalized_gif_pack(pack: &str) -> &str {
     match pack {
         "default" => "default",
@@ -297,7 +312,11 @@ impl CompanionApp {
         let mut loop_style = "classic".to_string();
         let mut speed = normalized_speed(f32::NAN);
         let has_modern_config = state.config.is_some();
-        let applied_config = config_key(state.config.as_ref());
+        let applied_config = config_key(config_for_owner(
+            &sessions,
+            owner_session_id.as_deref(),
+            state.config.as_ref(),
+        ));
         apply_config(
             applied_config.as_ref(),
             &mut position,
@@ -338,17 +357,23 @@ impl CompanionApp {
             while self.rx.try_recv().is_ok() {}
             let state = read_state(&self.state_path);
             self.sessions = state.sessions;
+            let owned_config = config_for_owner(
+                &self.sessions,
+                self.owner_session_id.as_deref(),
+                state.config.as_ref(),
+            );
             crate::log::debug(format!(
-                "state update owner={:?} sessions={} config={:?}",
+                "state update owner={:?} sessions={} global_config={:?} owned_config={:?}",
                 self.owner_session_id,
                 self.sessions.len(),
-                state.config
+                state.config,
+                owned_config
             ));
             self.window_positions = state.window_positions;
             self.project_keys
                 .retain(|cwd, _| self.sessions.iter().any(|session| &session.cwd == cwd));
             self.has_modern_config = state.config.is_some();
-            let next_config = config_key(state.config.as_ref());
+            let next_config = config_key(owned_config);
             let config_changed = self.applied_config != next_config;
             if config_changed {
                 apply_config(
@@ -403,7 +428,6 @@ impl eframe::App for CompanionApp {
         }
 
         if !self.registered {
-            self.gifs.register(ctx);
             ctx.data_mut(|d| d.insert_temp(egui::Id::new(SIZE_KEY), self.size));
             self.registered = true;
         } else if config_changed {
@@ -460,6 +484,7 @@ impl eframe::App for CompanionApp {
         let agent_frames: Vec<AnimationFrame> = if session.active_agents.is_empty() {
             self.gifs
                 .frame(
+                    ctx,
                     "intro",
                     &self.gif_pack,
                     self.speed,
@@ -474,6 +499,7 @@ impl eframe::App for CompanionApp {
                 .iter()
                 .filter_map(|agent| {
                     self.gifs.frame(
+                        ctx,
                         agent,
                         &self.gif_pack,
                         self.speed,
@@ -581,7 +607,7 @@ impl eframe::App for CompanionApp {
             });
 
         render_size_picker(ctx);
-        ctx.request_repaint_after(Duration::from_millis(50));
+        ctx.request_repaint_after(Duration::from_millis(16));
     }
 }
 
@@ -811,6 +837,7 @@ mod tests {
             status: status.to_string(),
             pid: Some(1),
             active_agent: None,
+            config: None,
         }
     }
 
@@ -1008,7 +1035,7 @@ mod tests {
             size: "large".into(),
             gif_pack: "default".into(),
             loop_style: "classic".into(),
-            speed: 1.5,
+            speed: 1.0,
         };
         assert_eq!(
             config_key(Some(&cfg)),
@@ -1017,7 +1044,7 @@ mod tests {
                 size: "large".into(),
                 gif_pack: "default".into(),
                 loop_style: "classic".into(),
-                speed_bits: 1.5f32.to_bits(),
+                speed_bits: 1.0f32.to_bits(),
             })
         );
         assert_eq!(config_key(None), None);
@@ -1030,28 +1057,28 @@ mod tests {
             size: "medium".into(),
             gif_pack: "default".into(),
             loop_style: "classic".into(),
-            speed_bits: 1.5f32.to_bits(),
+            speed_bits: 1.0f32.to_bits(),
         });
         let unchanged = Some(ConfigKey {
             position: "bottom-right".into(),
             size: "medium".into(),
             gif_pack: "default".into(),
             loop_style: "classic".into(),
-            speed_bits: 1.5f32.to_bits(),
+            speed_bits: 1.0f32.to_bits(),
         });
         let moved = Some(ConfigKey {
             position: "top-left".into(),
             size: "medium".into(),
             gif_pack: "default".into(),
             loop_style: "classic".into(),
-            speed_bits: 1.5f32.to_bits(),
+            speed_bits: 1.0f32.to_bits(),
         });
         let resized = Some(ConfigKey {
             position: "bottom-right".into(),
             size: "large".into(),
             gif_pack: "default".into(),
             loop_style: "classic".into(),
-            speed_bits: 1.5f32.to_bits(),
+            speed_bits: 1.0f32.to_bits(),
         });
 
         assert_eq!(previous, unchanged);
@@ -1100,6 +1127,6 @@ mod tests {
         assert_eq!(size, 120.0);
         assert_eq!(gif_pack, "default");
         assert_eq!(loop_style, "classic");
-        assert_eq!(speed, 1.5);
+        assert_eq!(speed, 1.0);
     }
 }

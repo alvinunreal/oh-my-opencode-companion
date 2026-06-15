@@ -28,7 +28,7 @@ fn default_loop_style() -> String {
 }
 
 fn default_speed() -> f32 {
-    1.5
+    1.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -60,6 +60,8 @@ pub struct SessionInfo {
     pub status: String,
     #[serde(default)]
     pub pid: Option<u32>,
+    #[serde(default)]
+    pub config: Option<CompanionConfigState>,
 }
 
 pub fn state_file_path() -> PathBuf {
