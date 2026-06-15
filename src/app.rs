@@ -23,6 +23,7 @@ const SIZE_PRESETS: &[(&str, f32)] = &[("S", 80.0), ("M", 120.0), ("L", 160.0), 
 const MENU_W: f32 = 76.0;
 const MENU_H: f32 = 58.0;
 const MENU_PAD: f32 = 2.0;
+const SURFACE_INSET: f32 = 1.0;
 
 const SIZE_KEY: &str = "companion_size";
 const MENU_OPEN_KEY: &str = "companion_menu_open";
@@ -595,7 +596,7 @@ impl eframe::App for CompanionApp {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::none()
-                    .fill(egui::Color32::BLACK)
+                    .fill(egui::Color32::TRANSPARENT)
                     .inner_margin(egui::Margin::ZERO),
             )
             .show(ctx, |ui| {
@@ -661,22 +662,35 @@ fn render_session(
     let (cols, rows) = grid_dims(n);
     let rects = cell_rects(n, cols, rows, current_size);
 
+    let surface = egui::Rect::from_min_max(
+        egui::pos2(SURFACE_INSET, SURFACE_INSET),
+        egui::pos2(win_w - SURFACE_INSET, win_h - SURFACE_INSET),
+    );
+    ui.painter().rect_filled(surface, 0.0, egui::Color32::BLACK);
+
     for (i, frame) in agent_frames.iter().enumerate() {
         if let Some(&cell) = rects.get(i) {
-            ui.painter()
-                .image(frame.texture_id, cell, frame.uv, egui::Color32::WHITE);
+            ui.painter().image(
+                frame.texture_id,
+                cell.shrink(SURFACE_INSET),
+                frame.uv,
+                egui::Color32::WHITE,
+            );
         }
     }
 
     let label_h = (current_size * 0.15).clamp(13.0, 30.0);
     let font_size = (current_size * 0.09).clamp(9.0, 13.0);
-    let strip =
-        egui::Rect::from_min_size(egui::pos2(0.0, win_h - label_h), egui::vec2(win_w, label_h));
+    let strip = egui::Rect::from_min_size(
+        egui::pos2(SURFACE_INSET, win_h - label_h - SURFACE_INSET),
+        egui::vec2(win_w - SURFACE_INSET * 2.0, label_h),
+    );
     ui.painter()
         .rect_filled(strip, 0.0, egui::Color32::from_black_alpha(185));
 
     let fid = egui::FontId::proportional(font_size);
-    let label = fit_text(ctx, &project, &fid, win_w - 10.0);
+    let max_text_w = win_w - 10.0;
+    let label = fit_text(ctx, &project, &fid, max_text_w);
     ui.painter().text(
         strip.center(),
         egui::Align2::CENTER_CENTER,
@@ -711,8 +725,8 @@ fn render_size_picker(ctx: &egui::Context, win_w: f32, win_h: f32) {
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 egui::Frame::none()
-                    .fill(egui::Color32::from_rgba_premultiplied(22, 22, 24, 245))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(82)))
+                    .fill(egui::Color32::from_rgb(20, 20, 22))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(35)))
                     .inner_margin(egui::Margin::symmetric(4.0, 4.0))
                     .show(ui, |ui| {
                         ui.set_min_width(MENU_W - MENU_PAD * 2.0);
@@ -727,15 +741,15 @@ fn render_size_picker(ctx: &egui::Context, win_w: f32, win_h: f32) {
                             for (label, preset) in SIZE_PRESETS {
                                 let active = (size - preset).abs() < 0.5;
                                 let fill = if active {
-                                    egui::Color32::from_rgb(78, 92, 122)
+                                    egui::Color32::from_rgb(58, 72, 102)
                                 } else {
-                                    egui::Color32::from_rgb(38, 38, 42)
+                                    egui::Color32::from_rgb(30, 30, 32)
                                 };
                                 let text = egui::RichText::new(*label).size(11.0).strong().color(
                                     if active {
                                         egui::Color32::WHITE
                                     } else {
-                                        egui::Color32::from_rgb(210, 210, 214)
+                                        egui::Color32::from_rgb(200, 200, 204)
                                     },
                                 );
                                 if ui
@@ -763,9 +777,9 @@ fn render_size_picker(ctx: &egui::Context, win_w: f32, win_h: f32) {
                                 egui::Button::new(
                                     egui::RichText::new("Close")
                                         .size(11.0)
-                                        .color(egui::Color32::from_rgb(235, 120, 120)),
+                                        .color(egui::Color32::from_rgb(240, 110, 110)),
                                 )
-                                .fill(egui::Color32::from_rgb(42, 32, 34))
+                                .fill(egui::Color32::from_rgb(38, 24, 26))
                                 .stroke(egui::Stroke::NONE),
                             )
                             .clicked()
