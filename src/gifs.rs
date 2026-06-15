@@ -1,46 +1,91 @@
-use egui::Context;
+use egui::{ColorImage, Context, Rect, TextureHandle, TextureId, TextureOptions};
 use std::collections::HashMap;
 
 const DEFAULT_SPEED: f32 = 1.5;
+const FRAME_RATE: f32 = 24.0;
+const FRAME_COUNT: usize = 72;
+const SHEET_COLS: usize = 12;
+const SHEET_ROWS: usize = 6;
 
 pub struct Gifs {
-    map: HashMap<&'static str, &'static [u8]>,
+    sheets: HashMap<&'static str, &'static [u8]>,
+    textures: HashMap<&'static str, TextureHandle>,
+}
+
+#[derive(Clone, Copy)]
+pub struct AnimationFrame {
+    pub texture_id: TextureId,
+    pub uv: Rect,
 }
 
 impl Gifs {
     pub fn new() -> Self {
-        let mut map: HashMap<&'static str, &'static [u8]> = HashMap::new();
-        map.insert("council", include_bytes!("../gifs/council.gif"));
-        map.insert("councillor", include_bytes!("../gifs/council.gif"));
-        map.insert("designer", include_bytes!("../gifs/designer.gif"));
-        map.insert("explorer", include_bytes!("../gifs/explorer.gif"));
-        map.insert("fixer", include_bytes!("../gifs/fixer.gif"));
-        map.insert("input", include_bytes!("../gifs/question.gif"));
-        map.insert("intro", include_bytes!("../gifs/intro.gif"));
-        map.insert("librarian", include_bytes!("../gifs/librarian.gif"));
-        map.insert("oracle", include_bytes!("../gifs/oracle.gif"));
-        map.insert("orchestrator", include_bytes!("../gifs/orchestrator.gif"));
-        Self { map }
-    }
-
-    pub fn register(&self, ctx: &Context, speed: f32) {
-        egui_extras::install_image_loaders(ctx);
-        let speed = normalized_speed(speed);
-        for (name, bytes) in &self.map {
-            ctx.include_bytes(
-                format!("bytes://{name}@{speed:.2}.gif"),
-                speed_gif(bytes, speed),
-            );
+        let mut sheets: HashMap<&'static str, &'static [u8]> = HashMap::new();
+        sheets.insert("council", include_bytes!("../animations/council.jpg"));
+        sheets.insert("councillor", include_bytes!("../animations/council.jpg"));
+        sheets.insert("designer", include_bytes!("../animations/designer.jpg"));
+        sheets.insert("explorer", include_bytes!("../animations/explorer.jpg"));
+        sheets.insert("fixer", include_bytes!("../animations/fixer.jpg"));
+        sheets.insert("input", include_bytes!("../animations/question.jpg"));
+        sheets.insert("intro", include_bytes!("../animations/intro.jpg"));
+        sheets.insert("librarian", include_bytes!("../animations/librarian.jpg"));
+        sheets.insert("oracle", include_bytes!("../animations/oracle.jpg"));
+        sheets.insert(
+            "orchestrator",
+            include_bytes!("../animations/orchestrator.jpg"),
+        );
+        Self {
+            sheets,
+            textures: HashMap::new(),
         }
     }
 
-    pub fn uri(&self, agent: &str, gif_pack: &str, speed: f32) -> String {
-        let name = if gif_pack == "default" && self.map.contains_key(agent) {
+    pub fn register(&mut self, ctx: &Context) {
+        for (name, bytes) in &self.sheets {
+            if self.textures.contains_key(name) {
+                continue;
+            }
+            let started = std::time::Instant::now();
+            match decode_sprite_sheet(bytes) {
+                Ok(image) => {
+                    let texture = ctx.load_texture(
+                        format!("companion-animation-{name}"),
+                        image,
+                        TextureOptions::LINEAR,
+                    );
+                    crate::log::debug(format!(
+                        "animation register name={} bytes={} elapsed_ms={}",
+                        name,
+                        bytes.len(),
+                        started.elapsed().as_millis()
+                    ));
+                    self.textures.insert(name, texture);
+                }
+                Err(err) => {
+                    crate::log::debug(format!("animation decode failed name={} err={}", name, err));
+                }
+            }
+        }
+    }
+
+    pub fn frame(
+        &self,
+        agent: &str,
+        gif_pack: &str,
+        speed: f32,
+        loop_style: &str,
+        time_seconds: f64,
+    ) -> Option<AnimationFrame> {
+        let name = if gif_pack == "default" && self.textures.contains_key(agent) {
             agent
         } else {
             "orchestrator"
         };
-        format!("bytes://{name}@{:.2}.gif", normalized_speed(speed))
+        let texture = self.textures.get(name)?;
+        Some(AnimationFrame {
+            texture_id: texture.id(),
+            uv: frame_uv(frame_index(time_seconds, speed, loop_style)),
+        })
     }
 }
 
@@ -52,47 +97,81 @@ pub fn normalized_speed(speed: f32) -> f32 {
     }
 }
 
-fn speed_gif(bytes: &[u8], speed: f32) -> Vec<u8> {
-    let speed = normalized_speed(speed);
-    if (speed - 1.0).abs() < f32::EPSILON {
-        return bytes.to_vec();
+fn normalized_loop_style(loop_style: &str) -> &str {
+    if loop_style == "smooth" {
+        "smooth"
+    } else {
+        "classic"
     }
+}
 
-    let mut out = bytes.to_vec();
-    let mut i = 0;
-    while i + 7 < out.len() {
-        // GIF Graphic Control Extension:
-        // 21 F9 04 <packed> <delay lo> <delay hi> <transparent index> 00
-        if out[i] == 0x21 && out[i + 1] == 0xF9 && out[i + 2] == 0x04 {
-            let delay = u16::from_le_bytes([out[i + 4], out[i + 5]]);
-            if delay > 0 {
-                let scaled = ((delay as f32) / speed).round().clamp(1.0, u16::MAX as f32) as u16;
-                let [lo, hi] = scaled.to_le_bytes();
-                out[i + 4] = lo;
-                out[i + 5] = hi;
-            }
-            i += 8;
+fn frame_index(time_seconds: f64, speed: f32, loop_style: &str) -> usize {
+    let tick = (time_seconds.max(0.0) * FRAME_RATE as f64 * normalized_speed(speed) as f64).floor()
+        as usize;
+    if normalized_loop_style(loop_style) == "smooth" {
+        let period = FRAME_COUNT * 2 - 2;
+        let phase = tick % period;
+        if phase < FRAME_COUNT {
+            phase
         } else {
-            i += 1;
+            period - phase
         }
+    } else {
+        tick % FRAME_COUNT
     }
-    out
+}
+
+fn frame_uv(index: usize) -> Rect {
+    let col = index % SHEET_COLS;
+    let row = index / SHEET_COLS;
+    let w = 1.0 / SHEET_COLS as f32;
+    let h = 1.0 / SHEET_ROWS as f32;
+    Rect::from_min_max(
+        egui::pos2(col as f32 * w, row as f32 * h),
+        egui::pos2((col + 1) as f32 * w, (row + 1) as f32 * h),
+    )
+}
+
+fn decode_sprite_sheet(bytes: &[u8]) -> Result<ColorImage, image::ImageError> {
+    let image = image::load_from_memory(bytes)?.to_rgba8();
+    let size = [image.width() as usize, image.height() as usize];
+    Ok(ColorImage::from_rgba_unmultiplied(size, image.as_raw()))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::speed_gif;
+    use super::{frame_index, frame_uv, normalized_speed, FRAME_COUNT};
 
     #[test]
-    fn speed_gif_scales_graphic_control_extension_delay() {
-        let gif = [
-            0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x21, 0xF9, 0x04, 0x00, 10, 0, 0x00, 0x00,
-        ];
+    fn speed_is_clamped_and_defaults_fast() {
+        assert_eq!(normalized_speed(f32::NAN), 1.5);
+        assert_eq!(normalized_speed(0.1), 0.25);
+        assert_eq!(normalized_speed(9.0), 4.0);
+    }
 
-        let sped_up = speed_gif(&gif, 2.0);
-        assert_eq!(u16::from_le_bytes([sped_up[10], sped_up[11]]), 5);
+    #[test]
+    fn classic_loop_wraps_forward() {
+        assert_eq!(frame_index(0.0, 1.0, "classic"), 0);
+        assert_eq!(frame_index(3.0, 1.0, "classic"), 0);
+        assert_eq!(frame_index(3.0 + 1.0 / 24.0, 1.0, "classic"), 1);
+    }
 
-        let slowed_down = speed_gif(&gif, 0.5);
-        assert_eq!(u16::from_le_bytes([slowed_down[10], slowed_down[11]]), 20);
+    #[test]
+    fn smooth_loop_ping_pongs_without_duplicate_endpoints() {
+        assert_eq!(frame_index(0.0, 1.0, "smooth"), 0);
+        assert_eq!(
+            frame_index((FRAME_COUNT - 1) as f64 / 24.0, 1.0, "smooth"),
+            71
+        );
+        assert_eq!(frame_index(FRAME_COUNT as f64 / 24.0, 1.0, "smooth"), 70);
+    }
+
+    #[test]
+    fn frame_uv_maps_sprite_grid_cells() {
+        let uv = frame_uv(13);
+        assert!(uv.min.x > 0.0);
+        assert!(uv.min.y > 0.0);
+        assert!(uv.max.x <= 1.0);
+        assert!(uv.max.y <= 1.0);
     }
 }

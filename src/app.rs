@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use eframe::egui;
 
-use crate::gifs::Gifs;
+use crate::gifs::{AnimationFrame, Gifs};
 use crate::niri;
 use crate::screen::primary_size;
 use crate::state::{
@@ -403,13 +403,12 @@ impl eframe::App for CompanionApp {
         }
 
         if !self.registered {
-            self.gifs.register(ctx, self.speed);
+            self.gifs.register(ctx);
             ctx.data_mut(|d| d.insert_temp(egui::Id::new(SIZE_KEY), self.size));
             self.registered = true;
         } else if config_changed {
             // Config/state changes are the source of truth. A right-click picker
             // selection remains local until the config tuple changes.
-            self.gifs.register(ctx, self.speed);
             ctx.data_mut(|d| d.insert_temp(egui::Id::new(SIZE_KEY), self.size));
         }
 
@@ -457,16 +456,34 @@ impl eframe::App for CompanionApp {
         }
         let project_key = self.project_key_for(&session.cwd);
         let saved_position = self.window_positions.get(&project_key).copied();
-        let agent_uris: Vec<String> = if session.active_agents.is_empty() {
-            vec![self.gifs.uri("intro", &self.gif_pack, self.speed)]
+        let time_seconds = ctx.input(|input| input.time);
+        let agent_frames: Vec<AnimationFrame> = if session.active_agents.is_empty() {
+            self.gifs
+                .frame(
+                    "intro",
+                    &self.gif_pack,
+                    self.speed,
+                    &self.loop_style,
+                    time_seconds,
+                )
+                .into_iter()
+                .collect()
         } else {
             session
                 .active_agents
                 .iter()
-                .map(|agent| self.gifs.uri(agent, &self.gif_pack, self.speed))
+                .filter_map(|agent| {
+                    self.gifs.frame(
+                        agent,
+                        &self.gif_pack,
+                        self.speed,
+                        &self.loop_style,
+                        time_seconds,
+                    )
+                })
                 .collect()
         };
-        let n = agent_uris.len().max(1);
+        let n = agent_frames.len().max(1);
         let (cols, rows) = grid_dims(n);
         let [win_w, win_h] = window_size(self.size, cols, rows);
 
@@ -560,7 +577,7 @@ impl eframe::App for CompanionApp {
                 // delays. loopStyle is still reserved for future playback
                 // behavior that is independent from the selected GIF pack.
                 let _loop_style = &self.loop_style;
-                render_session(ui, ctx, &session, &agent_uris, self.size, win_w, win_h);
+                render_session(ui, ctx, &session, &agent_frames, self.size, win_w, win_h);
             });
 
         render_size_picker(ctx);
@@ -604,7 +621,7 @@ fn render_session(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
     session: &SessionInfo,
-    agent_uris: &[String],
+    agent_frames: &[AnimationFrame],
     current_size: f32,
     win_w: f32,
     win_h: f32,
@@ -617,16 +634,14 @@ fn render_session(
         .unwrap_or("unknown")
         .to_string();
 
-    let n = agent_uris.len().max(1);
+    let n = agent_frames.len().max(1);
     let (cols, rows) = grid_dims(n);
     let rects = cell_rects(n, cols, rows, current_size);
 
-    for (i, uri) in agent_uris.iter().enumerate() {
+    for (i, frame) in agent_frames.iter().enumerate() {
         if let Some(&cell) = rects.get(i) {
-            ui.put(
-                cell,
-                egui::Image::new(uri).fit_to_exact_size(egui::vec2(current_size, current_size)),
-            );
+            ui.painter()
+                .image(frame.texture_id, cell, frame.uv, egui::Color32::WHITE);
         }
     }
 
