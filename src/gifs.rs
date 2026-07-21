@@ -95,7 +95,7 @@ impl Gifs {
         self.sheets
             .get_key_value(agent)
             .map(|(name, _)| *name)
-            .unwrap_or("orchestrator")
+            .unwrap_or("intro")
     }
 }
 
@@ -151,7 +151,32 @@ fn decode_sprite_sheet(bytes: &[u8]) -> Result<ColorImage, image::ImageError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{frame_index, frame_uv, normalized_speed, FRAME_COUNT};
+    use super::{frame_index, frame_uv, normalized_speed, Gifs, FRAME_COUNT};
+
+    #[test]
+    fn unknown_agents_use_the_neutral_intro_animation() {
+        let gifs = Gifs::new();
+
+        for agent in ["plan", "build", "general", "explore", "custom-agent"] {
+            assert_eq!(gifs.resolve_name(agent, "default"), "intro");
+        }
+    }
+
+    #[test]
+    fn known_agents_keep_their_own_animations() {
+        let gifs = Gifs::new();
+
+        for agent in [
+            "orchestrator",
+            "explorer",
+            "librarian",
+            "oracle",
+            "designer",
+            "fixer",
+        ] {
+            assert_eq!(gifs.resolve_name(agent, "default"), agent);
+        }
+    }
 
     #[test]
     fn speed_is_clamped_and_defaults_fast() {
