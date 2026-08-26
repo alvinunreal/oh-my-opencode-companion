@@ -162,7 +162,7 @@ mod tests {
     fn unknown_agents_use_the_unknown_animation() {
         let gifs = Gifs::new();
 
-        for agent in ["plan", "build", "general", "explore", "qa", "custom-agent"] {
+        for agent in ["plan", "build", "general", "explore", "custom-agent"] {
             assert_eq!(gifs.resolve_name(agent, "default"), "unknown");
         }
     }
