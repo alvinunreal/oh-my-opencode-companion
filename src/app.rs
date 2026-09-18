@@ -148,8 +148,16 @@ fn window_size(cell: f32, cols: usize, rows: usize) -> [f32; 2] {
     [cell * cols as f32, cell * rows as f32]
 }
 
-fn should_start_drag(menu_open: bool, primary_pressed: bool) -> bool {
-    !menu_open && primary_pressed
+fn handle_drag_start(
+    ctx: &egui::Context,
+    menu_open: bool,
+    project_key: &str,
+    drag_project_key: &mut Option<String>,
+) {
+    if !menu_open && ctx.input(|i| i.pointer.primary_pressed()) {
+        *drag_project_key = Some(project_key.to_owned());
+        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
 }
 
 pub(crate) fn place_window(position: &str, screen: [f32; 2], win: [f32; 2]) -> [f32; 2] {
@@ -568,10 +576,7 @@ impl eframe::App for CompanionApp {
             self.spawn_niri_fallback([win_w, win_h], saved_position);
         }
 
-        if should_start_drag(menu_open, ctx.input(|i| i.pointer.primary_pressed())) {
-            self.drag_project_key = Some(project_key.clone());
-            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-        }
+        handle_drag_start(ctx, menu_open, &project_key, &mut self.drag_project_key);
         if ctx.input(|i| i.pointer.primary_released()) {
             if let Some(project_key) = self.drag_project_key.take() {
                 if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
@@ -861,9 +866,9 @@ fn is_pid_alive(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_config, choose_owned_session, choose_session, config_key, grid_dims, place_window,
-        restore_window_position, should_start_drag, size_from_config, window_size, ConfigKey,
-        SessionInfo, WindowGeometryKey, GAP,
+        apply_config, choose_owned_session, choose_session, config_key, grid_dims,
+        handle_drag_start, place_window, restore_window_position, size_from_config, window_size,
+        ConfigKey, SessionInfo, WindowGeometryKey, GAP,
     };
     use crate::state::CompanionConfigState;
 
@@ -1186,41 +1191,112 @@ mod tests {
         assert_eq!(speed, 1.0);
     }
 
-    #[test]
-    fn should_start_drag_requires_press_and_closed_menu() {
-        assert!(should_start_drag(false, true));
-        assert!(!should_start_drag(true, true));
-        assert!(!should_start_drag(false, false));
-        assert!(!should_start_drag(true, false));
+    fn primary_button_event(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    fn run_drag_frame(
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        menu_open: bool,
+        project_key: &str,
+        drag_key: &mut Option<String>,
+    ) -> usize {
+        let screen_rect =
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(800.0, 600.0));
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(screen_rect);
+        raw.events = events;
+        let full = ctx.run(raw, |ctx| {
+            handle_drag_start(ctx, menu_open, project_key, drag_key);
+        });
+        full.viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|vo| {
+                vo.commands
+                    .iter()
+                    .filter(|c| matches!(c, egui::ViewportCommand::StartDrag))
+                    .count()
+            })
+            .unwrap_or(0)
     }
 
     #[test]
-    fn one_press_emits_at_most_one_start_drag() {
-        // Simulate frames: (menu_open, primary_pressed) -> should emit?
-        // Frame 0: no press, frame 1: press edge, frames 2..N: held but no press edge.
-        let frames = [
-            (false, false),
-            (false, true),
-            (false, false),
-            (false, false),
-            (false, false),
-        ];
-        let emits: Vec<bool> = frames
-            .iter()
-            .map(|(m, p)| should_start_drag(*m, *p))
-            .collect();
-        assert_eq!(emits, vec![false, true, false, false, false]);
-        assert_eq!(emits.iter().filter(|&&b| b).count(), 1);
+    fn drag_gesture_via_context_emits_exactly_one_start_drag() {
+        use eframe::egui;
+        let ctx = egui::Context::default();
+        let mut drag_key: Option<String> = None;
+        let project_key = "proj";
+        let pos = egui::Pos2::new(10.0, 10.0);
+
+        // idle
+        assert_eq!(
+            run_drag_frame(&ctx, vec![], false, project_key, &mut drag_key),
+            0
+        );
+        assert_eq!(drag_key, None);
+        // press edge — single StartDrag, arms drag key
+        assert_eq!(
+            run_drag_frame(
+                &ctx,
+                vec![primary_button_event(pos, true)],
+                false,
+                project_key,
+                &mut drag_key
+            ),
+            1
+        );
+        assert_eq!(drag_key, Some(project_key.to_owned()));
+        // held frames — primary_down stays true internally, primary_pressed false — must not re-emit
+        for _ in 0..3 {
+            assert_eq!(
+                run_drag_frame(&ctx, vec![], false, project_key, &mut drag_key),
+                0,
+                "held frame must not emit StartDrag"
+            );
+        }
+        // release — no StartDrag
+        assert_eq!(
+            run_drag_frame(
+                &ctx,
+                vec![primary_button_event(pos, false)],
+                false,
+                project_key,
+                &mut drag_key
+            ),
+            0
+        );
     }
 
     #[test]
-    fn consecutive_presses_each_emit_once() {
-        // Two distinct gestures: press, release, press again.
-        let gestures = [(false, true), (false, false), (false, true), (false, false)];
-        let count = gestures
-            .iter()
-            .filter(|(m, p)| should_start_drag(*m, *p))
-            .count();
-        assert_eq!(count, 2);
+    fn drag_start_suppressed_when_menu_open_via_context() {
+        use eframe::egui;
+        let ctx = egui::Context::default();
+        let mut drag_key: Option<String> = None;
+        let project_key = "proj";
+        let pos = egui::Pos2::new(20.0, 20.0);
+
+        // press with menu open must not emit
+        assert_eq!(
+            run_drag_frame(
+                &ctx,
+                vec![primary_button_event(pos, true)],
+                true,
+                project_key,
+                &mut drag_key
+            ),
+            0
+        );
+        assert_eq!(drag_key, None);
+        // even subsequent held frames must not emit
+        assert_eq!(
+            run_drag_frame(&ctx, vec![], true, project_key, &mut drag_key),
+            0
+        );
     }
 }
