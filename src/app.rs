@@ -148,6 +148,10 @@ fn window_size(cell: f32, cols: usize, rows: usize) -> [f32; 2] {
     [cell * cols as f32, cell * rows as f32]
 }
 
+fn should_start_drag(menu_open: bool, primary_pressed: bool) -> bool {
+    !menu_open && primary_pressed
+}
+
 pub(crate) fn place_window(position: &str, screen: [f32; 2], win: [f32; 2]) -> [f32; 2] {
     let (screen_w, screen_h) = (screen[0], screen[1]);
     let (win_w, win_h) = (win[0], win[1]);
@@ -564,10 +568,8 @@ impl eframe::App for CompanionApp {
             self.spawn_niri_fallback([win_w, win_h], saved_position);
         }
 
-        if !menu_open && ctx.input(|i| i.pointer.primary_pressed()) {
+        if should_start_drag(menu_open, ctx.input(|i| i.pointer.primary_pressed())) {
             self.drag_project_key = Some(project_key.clone());
-        }
-        if self.drag_project_key.is_some() && ctx.input(|i| i.pointer.primary_down()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
         if ctx.input(|i| i.pointer.primary_released()) {
@@ -860,8 +862,8 @@ fn is_pid_alive(_pid: u32) -> bool {
 mod tests {
     use super::{
         apply_config, choose_owned_session, choose_session, config_key, grid_dims, place_window,
-        restore_window_position, size_from_config, window_size, ConfigKey, SessionInfo,
-        WindowGeometryKey, GAP,
+        restore_window_position, should_start_drag, size_from_config, window_size, ConfigKey,
+        SessionInfo, WindowGeometryKey, GAP,
     };
     use crate::state::CompanionConfigState;
 
@@ -1182,5 +1184,43 @@ mod tests {
         assert_eq!(gif_pack, "default");
         assert_eq!(loop_style, "classic");
         assert_eq!(speed, 1.0);
+    }
+
+    #[test]
+    fn should_start_drag_requires_press_and_closed_menu() {
+        assert!(should_start_drag(false, true));
+        assert!(!should_start_drag(true, true));
+        assert!(!should_start_drag(false, false));
+        assert!(!should_start_drag(true, false));
+    }
+
+    #[test]
+    fn one_press_emits_at_most_one_start_drag() {
+        // Simulate frames: (menu_open, primary_pressed) -> should emit?
+        // Frame 0: no press, frame 1: press edge, frames 2..N: held but no press edge.
+        let frames = [
+            (false, false),
+            (false, true),
+            (false, false),
+            (false, false),
+            (false, false),
+        ];
+        let emits: Vec<bool> = frames
+            .iter()
+            .map(|(m, p)| should_start_drag(*m, *p))
+            .collect();
+        assert_eq!(emits, vec![false, true, false, false, false]);
+        assert_eq!(emits.iter().filter(|&&b| b).count(), 1);
+    }
+
+    #[test]
+    fn consecutive_presses_each_emit_once() {
+        // Two distinct gestures: press, release, press again.
+        let gestures = [(false, true), (false, false), (false, true), (false, false)];
+        let count = gestures
+            .iter()
+            .filter(|(m, p)| should_start_drag(*m, *p))
+            .count();
+        assert_eq!(count, 2);
     }
 }
