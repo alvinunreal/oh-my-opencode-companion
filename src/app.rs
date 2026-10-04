@@ -497,6 +497,22 @@ fn preset_request_completed(sessions: &[SessionInfo], request_id: &str) -> bool 
     })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct PendingPresetRequest {
+    request_id: String,
+    session_id: String,
+}
+
+fn pending_preset_request_should_clear(
+    sessions: &[SessionInfo],
+    pending: &PendingPresetRequest,
+) -> bool {
+    preset_request_completed(sessions, &pending.request_id)
+        || !sessions
+            .iter()
+            .any(|session| session.session_id == pending.session_id)
+}
+
 fn choose_owned_session(sessions: &[SessionInfo], owner_session_id: Option<&str>) -> Option<usize> {
     if let Some(owner_session_id) = owner_session_id {
         if let Some(index) = sessions
@@ -532,7 +548,7 @@ pub struct CompanionApp {
     drag_project_key: Option<String>,
     last_attention_key: Option<(String, u64)>,
     preset_request_seq: u64,
-    pending_preset_request_id: Option<String>,
+    pending_preset_request: Option<PendingPresetRequest>,
     niri_generation: Arc<AtomicU64>,
 }
 
@@ -595,7 +611,7 @@ impl CompanionApp {
             drag_project_key: None,
             last_attention_key: None,
             preset_request_seq: 0,
-            pending_preset_request_id: None,
+            pending_preset_request: None,
             niri_generation: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -604,10 +620,13 @@ impl CompanionApp {
         if self.rx.try_recv().is_ok() {
             while self.rx.try_recv().is_ok() {}
             let state = read_state(&self.state_path);
-            if let Some(pending_request_id) = self.pending_preset_request_id.as_deref() {
-                if preset_request_completed(&state.sessions, pending_request_id) {
-                    self.pending_preset_request_id = None;
-                }
+            let clear_pending = self
+                .pending_preset_request
+                .as_ref()
+                .map(|pending| pending_preset_request_should_clear(&state.sessions, pending))
+                .unwrap_or(false);
+            if clear_pending {
+                self.pending_preset_request = None;
             }
             self.sessions = state.sessions;
             let owned_config = config_for_owner(
@@ -645,6 +664,14 @@ impl CompanionApp {
         let has_modern = self.has_modern_config;
         self.sessions
             .retain(|s| s.pid.map(is_pid_alive).unwrap_or(!has_modern));
+        let clear_pending = self
+            .pending_preset_request
+            .as_ref()
+            .map(|pending| pending_preset_request_should_clear(&self.sessions, pending))
+            .unwrap_or(false);
+        if clear_pending {
+            self.pending_preset_request = None;
+        }
         false
     }
 
@@ -881,7 +908,7 @@ impl eframe::App for CompanionApp {
             win_w,
             win_h,
             session.preset.as_ref(),
-            self.pending_preset_request_id.is_some(),
+            self.pending_preset_request.is_some(),
             &session.session_id,
             &session.cwd,
         ) {
@@ -896,7 +923,10 @@ impl eframe::App for CompanionApp {
             };
             match write_preset_request(&self.state_path, request) {
                 Ok(()) => {
-                    self.pending_preset_request_id = Some(request_id);
+                    self.pending_preset_request = Some(PendingPresetRequest {
+                        request_id,
+                        session_id: session.session_id.clone(),
+                    });
                 }
                 Err(err) => {
                     crate::log::debug(format!("preset request write failed: {err}"));
@@ -1434,9 +1464,10 @@ mod tests {
     use super::{
         adjacent_preset, agent_detail_tooltip, apply_config, attention_key, attention_stroke,
         attention_type_for_status, choose_owned_session, choose_session, config_key, grid_dims,
-        handle_drag_start, place_window, preset_request_completed, restore_window_position,
-        should_apply_geometry, size_from_config, window_size, ConfigKey, PresetMenuAction,
-        PresetScope, SessionInfo, WindowGeometryKey, GAP,
+        handle_drag_start, pending_preset_request_should_clear, place_window,
+        preset_request_completed, restore_window_position, should_apply_geometry, size_from_config,
+        window_size, ConfigKey, PendingPresetRequest, PresetMenuAction, PresetScope, SessionInfo,
+        WindowGeometryKey, GAP,
     };
     use crate::state::{CompanionAgentDetail, CompanionConfigState, CompanionPresetState};
 
@@ -1475,6 +1506,39 @@ mod tests {
             result_ok: None,
             last_scope: None,
         }
+    }
+
+    #[test]
+    fn pending_preset_request_clears_when_target_session_disappears() {
+        let pending = PendingPresetRequest {
+            request_id: "req-1".into(),
+            session_id: "target".into(),
+        };
+        let target = session("target", "idle", &["intro"]);
+
+        assert!(!pending_preset_request_should_clear(
+            std::slice::from_ref(&target),
+            &pending
+        ));
+        assert!(pending_preset_request_should_clear(&[], &pending));
+    }
+
+    #[test]
+    fn pending_preset_request_keeps_cross_session_completion_matching() {
+        let pending = PendingPresetRequest {
+            request_id: "req-handoff".into(),
+            session_id: "target".into(),
+        };
+        let target = session("target", "idle", &["intro"]);
+        let mut successor = session("successor", "idle", &["intro"]);
+        let mut preset = preset_state(None, None, None, &[], &[]);
+        preset.last_request_id = Some("req-handoff".into());
+        successor.preset = Some(preset);
+
+        assert!(pending_preset_request_should_clear(
+            &[target, successor],
+            &pending
+        ));
     }
 
     #[test]
