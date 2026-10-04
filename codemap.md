@@ -9,6 +9,7 @@ Desktop companion application showing active agent GIFs per session. Runs as an 
 The companion communicates with OpenCode host runtime via file-based state sharing (JSON files) and displays animated overlays for active agents:
 
 - Displays animated GIFs for `idle`, `question`, `unknown`, and agent-specific animations (`council`, `designer`, `explorer`, `fixer`, `librarian`, `observer`, `oracle`, `orchestrator`).
+- Agent tiles can expose live session model/variant metadata on hover; waiting-input uses an attention outline without changing the animation contract. Error attention is intentionally deferred until canonical terminal evidence is available.
 - Animated windows can be resized (S/M/L/XL presets), repositioned via drag-and-drop, and anchored to screen edges.
 - The right-click menu exposes explicit Project/Global OMO preset scopes. Project scope is the default and can create/remove a local override via Inherit; Global scope changes only the user layer. The native UI writes typed scoped requests into shared state while TypeScript remains the sole owner of config validation and persistence.
 - Session state tracks window positions, sizes, and config per project directory using a hidden state file.
