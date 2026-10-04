@@ -116,6 +116,8 @@ pub struct SessionInfo {
     #[serde(default)]
     pub status: String,
     #[serde(default)]
+    pub attention_seq: u64,
+    #[serde(default)]
     pub pid: Option<u32>,
     #[serde(default)]
     pub config: Option<CompanionConfigState>,
