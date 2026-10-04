@@ -31,6 +31,8 @@ const MENU_OPEN_KEY: &str = "companion_menu_open";
 const MENU_POS_KEY: &str = "companion_menu_pos";
 const MENU_JUST_OPENED_KEY: &str = "companion_menu_just_opened";
 const PRESET_SCOPE_GLOBAL_KEY: &str = "companion_preset_scope_global";
+const PROJECT_OPEN_PENDING_KEY: &str = "companion_project_open_pending";
+const PROJECT_OPEN_ERROR_KEY: &str = "companion_project_open_error";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WindowGeometryKey {
@@ -236,6 +238,18 @@ fn agent_detail_tooltip(detail: &CompanionAgentDetail) -> String {
         lines.push(format!("Variant: {variant}"));
     }
     lines.join("\n")
+}
+
+fn attention_type_for_status(status: &str) -> Option<egui::UserAttentionType> {
+    match status {
+        "waiting-input" => Some(egui::UserAttentionType::Informational),
+        _ => None,
+    }
+}
+
+fn attention_key(session: &SessionInfo) -> Option<(String, u64)> {
+    attention_type_for_status(&session.status)
+        .map(|_| (session.session_id.clone(), session.attention_seq))
 }
 
 fn attention_stroke(status: &str) -> Option<egui::Stroke> {
@@ -532,6 +546,7 @@ pub struct CompanionApp {
     window_positions: std::collections::BTreeMap<String, WindowPositionState>,
     project_keys: std::collections::BTreeMap<String, String>,
     drag_project_key: Option<String>,
+    last_attention_key: Option<(String, u64)>,
     preset_request_seq: u64,
     pending_preset_request: Option<PendingPresetRequest>,
     niri_generation: Arc<AtomicU64>,
@@ -594,6 +609,7 @@ impl CompanionApp {
             window_positions,
             project_keys: std::collections::BTreeMap::new(),
             drag_project_key: None,
+            last_attention_key: None,
             preset_request_seq: 0,
             pending_preset_request: None,
             niri_generation: Arc::new(AtomicU64::new(0)),
@@ -726,6 +742,19 @@ impl eframe::App for CompanionApp {
         };
 
         let session = self.sessions[selected_idx].clone();
+        if let Some(next_attention_key) = attention_key(&session) {
+            if self.last_attention_key.as_ref() != Some(&next_attention_key) {
+                if let Some(attention) = attention_type_for_status(&session.status) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(attention));
+                }
+                self.last_attention_key = Some(next_attention_key);
+            }
+        } else if self.last_attention_key.take().is_some() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Reset,
+            ));
+        }
+
         let selection_log_key = format!(
             "{}|{}|{}|{:?}",
             session.session_id, session.cwd, session.status, session.active_agents
@@ -880,6 +909,8 @@ impl eframe::App for CompanionApp {
             win_h,
             session.preset.as_ref(),
             self.pending_preset_request.is_some(),
+            &session.session_id,
+            &session.cwd,
         ) {
             self.preset_request_seq = self.preset_request_seq.wrapping_add(1);
             let request_id = format!("{}-{}", std::process::id(), self.preset_request_seq);
@@ -1010,12 +1041,110 @@ fn render_session(
     }
 }
 
+fn open_project_directory(path: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let status = std::process::Command::new("explorer.exe")
+            .arg(path)
+            .status()
+            .map_err(|err| err.to_string())?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(format!("file manager exited with {status}"))
+        };
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("open")
+            .arg(path)
+            .status()
+            .map_err(|err| err.to_string())?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(format!("file manager exited with {status}"))
+        };
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let status = std::process::Command::new("xdg-open")
+            .arg(path)
+            .status()
+            .map_err(|err| err.to_string())?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(format!("file manager exited with {status}"))
+        };
+    }
+
+    #[allow(unreachable_code)]
+    Err("opening project folders is not supported on this platform".to_string())
+}
+
+fn project_open_pending_id(session_id: &str) -> egui::Id {
+    egui::Id::new((PROJECT_OPEN_PENDING_KEY, session_id))
+}
+
+fn project_open_error_id(session_id: &str) -> egui::Id {
+    egui::Id::new((PROJECT_OPEN_ERROR_KEY, session_id))
+}
+
+fn start_project_directory_open(ctx: &egui::Context, session_id: &str, path: &str) {
+    let pending_id = project_open_pending_id(session_id);
+    let error_id = project_open_error_id(session_id);
+    ctx.data_mut(|d| {
+        d.insert_temp(pending_id, true);
+        d.insert_temp(error_id, String::new());
+    });
+
+    let ctx_for_thread = ctx.clone();
+    let path = path.to_string();
+    let worker_path = path.clone();
+    let spawn_result = std::thread::Builder::new()
+        .name("companion-project-open".to_string())
+        .spawn(move || {
+            let result = open_project_directory(&worker_path);
+            if let Err(err) = &result {
+                crate::log::debug(format!(
+                    "open project folder failed path={worker_path:?}: {err}"
+                ));
+            }
+            ctx_for_thread.data_mut(|d| {
+                d.insert_temp(pending_id, false);
+                d.insert_temp(
+                    error_id,
+                    result
+                        .err()
+                        .map(|err| format!("Open failed: {err}"))
+                        .unwrap_or_default(),
+                );
+            });
+            ctx_for_thread.request_repaint();
+        });
+
+    if let Err(err) = spawn_result {
+        crate::log::debug(format!(
+            "open project folder worker failed path={path:?}: {err}"
+        ));
+        ctx.data_mut(|d| {
+            d.insert_temp(pending_id, false);
+            d.insert_temp(error_id, format!("Open failed: {err}"));
+        });
+    }
+}
+
 fn render_companion_menu(
     ctx: &egui::Context,
     win_w: f32,
     win_h: f32,
     preset_state: Option<&CompanionPresetState>,
     preset_pending: bool,
+    session_id: &str,
+    project_dir: &str,
 ) -> Option<PresetMenuAction> {
     let open: bool = ctx.data(|d| d.get_temp(egui::Id::new(MENU_OPEN_KEY)).unwrap_or(false));
     if !open {
@@ -1041,6 +1170,13 @@ fn render_companion_menu(
             .unwrap_or([20.0, 20.0])
     });
     let size: f32 = ctx.data(|d| d.get_temp(egui::Id::new(SIZE_KEY)).unwrap_or(DEFAULT_SIZE));
+    let pending_id = project_open_pending_id(session_id);
+    let error_id = project_open_error_id(session_id);
+    let project_open_pending = ctx.data(|d| d.get_temp::<bool>(pending_id).unwrap_or(false));
+    let project_open_error = ctx
+        .data(|d| d.get_temp::<String>(error_id).unwrap_or_default())
+        .trim()
+        .to_string();
     let x = pos[0].clamp(MENU_PAD, (win_w - MENU_W - MENU_PAD).max(MENU_PAD));
     let y = pos[1].clamp(MENU_PAD, (win_h - MENU_H - MENU_PAD).max(MENU_PAD));
     let mut selected: Option<PresetMenuAction> = None;
@@ -1185,24 +1321,78 @@ fn render_companion_menu(
 
                         ui.add_space(1.0);
 
-                        if ui
-                            .add_sized(
-                                [MENU_W - MENU_PAD * 2.0, 17.0],
-                                egui::Button::new(
-                                    egui::RichText::new("Close")
-                                        .size(11.0)
-                                        .color(egui::Color32::from_rgb(240, 110, 110)),
+                        ui.horizontal(|ui| {
+                            let open_label = if project_open_pending {
+                                "..."
+                            } else if project_open_error.is_empty() {
+                                "Open"
+                            } else {
+                                "!Open"
+                            };
+                            let open_color = if project_open_error.is_empty() {
+                                egui::Color32::WHITE
+                            } else {
+                                egui::Color32::from_rgb(240, 110, 110)
+                            };
+                            let open_hover = if project_open_pending {
+                                "Opening the project folder…".to_string()
+                            } else if project_open_error.is_empty() {
+                                "Open the project folder".to_string()
+                            } else {
+                                format!("Open the project folder\n{project_open_error}")
+                            };
+                            if ui
+                                .add_enabled(
+                                    !project_open_pending,
+                                    egui::Button::new(
+                                        egui::RichText::new(open_label).size(9.0).color(open_color),
+                                    )
+                                    .min_size(egui::vec2(23.0, 17.0))
+                                    .fill(egui::Color32::from_rgb(30, 30, 32))
+                                    .stroke(egui::Stroke::NONE),
                                 )
-                                .fill(egui::Color32::from_rgb(38, 24, 26))
-                                .stroke(egui::Stroke::NONE),
-                            )
-                            .clicked()
-                        {
-                            ctx.data_mut(|d| {
-                                d.insert_temp(egui::Id::new(MENU_OPEN_KEY), false);
-                                d.insert_temp(egui::Id::new("companion_quit"), true);
-                            });
-                        }
+                                .on_hover_text(open_hover)
+                                .clicked()
+                            {
+                                start_project_directory_open(ctx, session_id, project_dir);
+                            }
+
+                            if ui
+                                .add_sized(
+                                    [23.0, 17.0],
+                                    egui::Button::new(egui::RichText::new("Copy").size(9.0))
+                                        .fill(egui::Color32::from_rgb(30, 30, 32))
+                                        .stroke(egui::Stroke::NONE),
+                                )
+                                .on_hover_text("Copy the project path")
+                                .clicked()
+                            {
+                                ctx.copy_text(project_dir.to_string());
+                                ctx.data_mut(|d| {
+                                    d.insert_temp(egui::Id::new(MENU_OPEN_KEY), false);
+                                });
+                            }
+
+                            if ui
+                                .add_sized(
+                                    [20.0, 17.0],
+                                    egui::Button::new(
+                                        egui::RichText::new("×")
+                                            .size(12.0)
+                                            .color(egui::Color32::from_rgb(240, 110, 110)),
+                                    )
+                                    .fill(egui::Color32::from_rgb(38, 24, 26))
+                                    .stroke(egui::Stroke::NONE),
+                                )
+                                .on_hover_text("Close Companion")
+                                .clicked()
+                            {
+                                ctx.data_mut(|d| {
+                                    d.insert_temp(egui::Id::new(MENU_OPEN_KEY), false);
+                                    d.insert_temp(egui::Id::new("companion_quit"), true);
+                                });
+                            }
+                        });
                     });
             });
 
@@ -1272,11 +1462,12 @@ fn is_pid_alive(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        adjacent_preset, agent_detail_tooltip, apply_config, attention_stroke,
-        choose_owned_session, choose_session, config_key, grid_dims, handle_drag_start,
-        pending_preset_request_should_clear, place_window, preset_request_completed,
-        restore_window_position, should_apply_geometry, size_from_config, window_size, ConfigKey,
-        PendingPresetRequest, PresetMenuAction, PresetScope, SessionInfo, WindowGeometryKey, GAP,
+        adjacent_preset, agent_detail_tooltip, apply_config, attention_key, attention_stroke,
+        attention_type_for_status, choose_owned_session, choose_session, config_key, grid_dims,
+        handle_drag_start, pending_preset_request_should_clear, place_window,
+        preset_request_completed, restore_window_position, should_apply_geometry, size_from_config,
+        window_size, ConfigKey, PendingPresetRequest, PresetMenuAction, PresetScope, SessionInfo,
+        WindowGeometryKey, GAP,
     };
     use crate::state::{CompanionAgentDetail, CompanionConfigState, CompanionPresetState};
 
@@ -1287,6 +1478,7 @@ mod tests {
             active_agents: agents.iter().map(|s| s.to_string()).collect(),
             active_agent_details: Vec::new(),
             status: status.to_string(),
+            attention_seq: 0,
             pid: Some(1),
             active_agent: None,
             config: None,
@@ -1922,6 +2114,31 @@ mod tests {
             agent_detail_tooltip(&detail),
             "fixer\nModel: provider/model\nVariant: high"
         );
+    }
+
+    #[test]
+    fn attention_key_changes_for_each_waiting_input_generation() {
+        let mut waiting = session("waiting", "waiting-input", &["input"]);
+        waiting.attention_seq = 1;
+        assert_eq!(attention_key(&waiting), Some(("waiting".into(), 1)));
+
+        waiting.attention_seq = 2;
+        assert_eq!(attention_key(&waiting), Some(("waiting".into(), 2)));
+
+        waiting.status = "idle".into();
+        assert_eq!(attention_key(&waiting), None);
+    }
+
+    #[test]
+    fn native_attention_is_reserved_for_waiting_input() {
+        assert_eq!(
+            attention_type_for_status("waiting-input"),
+            Some(egui::UserAttentionType::Informational)
+        );
+        assert_eq!(attention_type_for_status("error"), None);
+        assert_eq!(attention_type_for_status("failed"), None);
+        assert_eq!(attention_type_for_status("busy"), None);
+        assert_eq!(attention_type_for_status("idle"), None);
     }
 
     #[test]
