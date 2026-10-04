@@ -11,8 +11,8 @@ use crate::gifs::{AnimationFrame, Gifs};
 use crate::niri;
 use crate::screen::primary_size;
 use crate::state::{
-    read_state, start_watcher, write_project_window_position, CompanionConfigState, SessionInfo,
-    WindowPositionState,
+    read_state, start_watcher, write_project_window_position, CompanionAgentDetail,
+    CompanionConfigState, SessionInfo, WindowPositionState,
 };
 
 const DEFAULT_SIZE: f32 = 120.0;
@@ -223,6 +223,34 @@ fn canonical_project_key(cwd: &str) -> String {
         .ok()
         .and_then(|path| path.to_str().map(str::to_string))
         .unwrap_or_else(|| cwd.to_string())
+}
+
+fn agent_detail_tooltip(detail: &CompanionAgentDetail) -> String {
+    let mut lines = vec![detail.agent.clone()];
+    if let Some(model) = detail.model.as_deref() {
+        lines.push(format!("Model: {model}"));
+    }
+    if let Some(variant) = detail.variant.as_deref() {
+        lines.push(format!("Variant: {variant}"));
+    }
+    lines.join("\n")
+}
+
+fn attention_stroke(status: &str) -> Option<egui::Stroke> {
+    match status {
+        "waiting-input" => Some(egui::Stroke::new(
+            2.0,
+            egui::Color32::from_rgb(245, 190, 75),
+        )),
+        _ => None,
+    }
+}
+
+fn paint_outline(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
+    painter.line_segment([rect.left_top(), rect.right_top()], stroke);
+    painter.line_segment([rect.right_top(), rect.right_bottom()], stroke);
+    painter.line_segment([rect.right_bottom(), rect.left_bottom()], stroke);
+    painter.line_segment([rect.left_bottom(), rect.left_top()], stroke);
 }
 
 fn cell_rects(agents: usize, cols: usize, rows: usize, cell: f32) -> Vec<egui::Rect> {
@@ -505,7 +533,7 @@ impl eframe::App for CompanionApp {
         let project_key = self.project_key_for(&session.cwd);
         let saved_position = self.window_positions.get(&project_key).copied();
         let time_seconds = ctx.input(|input| input.time);
-        let agent_frames: Vec<AnimationFrame> = if session.active_agents.is_empty() {
+        let agent_frames: Vec<(usize, AnimationFrame)> = if session.active_agents.is_empty() {
             self.gifs
                 .frame(
                     ctx,
@@ -516,20 +544,24 @@ impl eframe::App for CompanionApp {
                     time_seconds,
                 )
                 .into_iter()
+                .map(|frame| (usize::MAX, frame))
                 .collect()
         } else {
             session
                 .active_agents
                 .iter()
-                .filter_map(|agent| {
-                    self.gifs.frame(
-                        ctx,
-                        agent,
-                        &self.gif_pack,
-                        self.speed,
-                        &self.loop_style,
-                        time_seconds,
-                    )
+                .enumerate()
+                .filter_map(|(source_index, agent)| {
+                    self.gifs
+                        .frame(
+                            ctx,
+                            agent,
+                            &self.gif_pack,
+                            self.speed,
+                            &self.loop_style,
+                            time_seconds,
+                        )
+                        .map(|frame| (source_index, frame))
                 })
                 .collect()
         };
@@ -671,7 +703,7 @@ fn render_session(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
     session: &SessionInfo,
-    agent_frames: &[AnimationFrame],
+    agent_frames: &[(usize, AnimationFrame)],
     current_size: f32,
     win_w: f32,
     win_h: f32,
@@ -694,7 +726,7 @@ fn render_session(
     );
     ui.painter().rect_filled(surface, 0.0, egui::Color32::BLACK);
 
-    for (i, frame) in agent_frames.iter().enumerate() {
+    for (i, (source_index, frame)) in agent_frames.iter().enumerate() {
         if let Some(&cell) = rects.get(i) {
             ui.painter().image(
                 frame.texture_id,
@@ -702,6 +734,15 @@ fn render_session(
                 frame.uv,
                 egui::Color32::WHITE,
             );
+
+            if let Some(detail) = session.active_agent_details.get(*source_index) {
+                ui.interact(
+                    cell,
+                    egui::Id::new(("companion-agent-detail", &session.session_id, source_index)),
+                    egui::Sense::hover(),
+                )
+                .on_hover_text(agent_detail_tooltip(detail));
+            }
         }
     }
 
@@ -724,6 +765,10 @@ fn render_session(
         fid,
         egui::Color32::WHITE,
     );
+
+    if let Some(stroke) = attention_stroke(&session.status) {
+        paint_outline(ui.painter(), surface.shrink(1.0), stroke);
+    }
 }
 
 fn render_size_picker(ctx: &egui::Context, win_w: f32, win_h: f32) {
@@ -882,17 +927,19 @@ fn is_pid_alive(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_config, choose_owned_session, choose_session, config_key, grid_dims,
-        handle_drag_start, place_window, restore_window_position, should_apply_geometry,
-        size_from_config, window_size, ConfigKey, SessionInfo, WindowGeometryKey, GAP,
+        agent_detail_tooltip, apply_config, attention_stroke, choose_owned_session, choose_session,
+        config_key, grid_dims, handle_drag_start, place_window, restore_window_position,
+        should_apply_geometry, size_from_config, window_size, ConfigKey, SessionInfo,
+        WindowGeometryKey, GAP,
     };
-    use crate::state::CompanionConfigState;
+    use crate::state::{CompanionAgentDetail, CompanionConfigState};
 
     fn session(id: &str, status: &str, agents: &[&str]) -> SessionInfo {
         SessionInfo {
             session_id: id.to_string(),
             cwd: format!("/{id}"),
             active_agents: agents.iter().map(|s| s.to_string()).collect(),
+            active_agent_details: Vec::new(),
             status: status.to_string(),
             pid: Some(1),
             active_agent: None,
@@ -952,6 +999,29 @@ mod tests {
             session("active", "busy", &["fixer"]),
         ];
         assert_eq!(choose_owned_session(&sessions, Some("gone")), Some(1));
+    }
+
+    #[test]
+    fn agent_detail_tooltip_includes_live_model_and_variant() {
+        let detail = CompanionAgentDetail {
+            session_id: "child".into(),
+            agent: "fixer".into(),
+            model: Some("provider/model".into()),
+            variant: Some("high".into()),
+        };
+        assert_eq!(
+            agent_detail_tooltip(&detail),
+            "fixer\nModel: provider/model\nVariant: high"
+        );
+    }
+
+    #[test]
+    fn attention_outline_is_reserved_for_waiting_input() {
+        assert!(attention_stroke("waiting-input").is_some());
+        assert!(attention_stroke("error").is_none());
+        assert!(attention_stroke("failed").is_none());
+        assert!(attention_stroke("busy").is_none());
+        assert!(attention_stroke("idle").is_none());
     }
 
     #[test]
