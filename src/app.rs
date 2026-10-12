@@ -1136,7 +1136,7 @@ impl eframe::App for CompanionApp {
                         Ok(()) => {
                             self.pending_preset_request = Some(PendingPresetRequest {
                                 request_id,
-                                session_id: session.session_id.clone(),
+                                session_id: preset_target.session_id.clone(),
                             });
                         }
                         Err(err) => {
@@ -1779,6 +1779,17 @@ mod tests {
             &pending
         ));
         assert!(pending_preset_request_should_clear(&[], &pending));
+    }
+
+    #[test]
+    fn pending_edit_request_clears_when_target_exits_but_display_survives() {
+        let sessions = vec![session("display", "busy", &["fixer"])];
+        let pending = PendingPresetRequest {
+            request_id: "preset-for-target".into(),
+            session_id: "exited-edit-target".into(),
+        };
+        assert!(pending_preset_request_should_clear(&sessions, &pending));
+        assert_eq!(selected_session_index(&sessions, Some("display")), Some(0));
     }
 
     #[test]
