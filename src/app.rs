@@ -241,7 +241,10 @@ fn visible_on_monitor(
     native_pixels_per_point: f32,
     monitors: &[[f32; 4]],
 ) -> bool {
-    if !position.iter().chain(size.iter()).all(|value| value.is_finite())
+    if !position
+        .iter()
+        .chain(size.iter())
+        .all(|value| value.is_finite())
         || !native_pixels_per_point.is_finite()
         || native_pixels_per_point <= 0.0
         || size[0] <= 0.0
@@ -280,8 +283,7 @@ fn validated_saved_window_position(
     {
         let monitors = crate::screen::monitor_rects_physical()?;
         let _ = screen;
-        visible_on_monitor(position, size, native_pixels_per_point, &monitors)
-            .then_some(position)
+        visible_on_monitor(position, size, native_pixels_per_point, &monitors).then_some(position)
     }
 
     #[cfg(not(target_os = "windows"))]
