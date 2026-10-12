@@ -1502,8 +1502,11 @@ fn render_companion_menu(
                                             .color(egui::Color32::GRAY),
                                     );
                                 }
-                            } else {
+                            }
                             for index in project_session_indices(sessions) {
+                                if view == 2 {
+                                    continue;
+                                }
                                 let project = &sessions[index];
                                 let active = project.status == "busy"
                                     || project.status == "waiting-input"
@@ -1543,7 +1546,6 @@ fn render_companion_menu(
                                         .size(11.0)
                                         .color(egui::Color32::GRAY),
                                 );
-                            }
                             }
                         });
                     if matches == 0 {
