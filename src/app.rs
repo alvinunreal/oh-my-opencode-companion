@@ -819,10 +819,7 @@ impl eframe::App for CompanionApp {
         if preset_target_idx.is_none() {
             // Preserve the selected project identity for diagnostics and
             // actions, but disable preset writes until it is selected again.
-            preset_target.session_id = self
-                .preset_target_session_id
-                .clone()
-                .unwrap_or_default();
+            preset_target.session_id = self.preset_target_session_id.clone().unwrap_or_default();
             preset_target.cwd = self.preset_target_cwd.clone().unwrap_or_default();
             preset_target.preset = None;
             preset_target.status = "unavailable".to_string();
@@ -1032,7 +1029,9 @@ impl eframe::App for CompanionApp {
             match action {
                 CompanionMenuAction::SelectProject(session_id) => {
                     if self.sessions.iter().any(|s| s.session_id == session_id) {
-                        self.preset_target_cwd = self.sessions.iter()
+                        self.preset_target_cwd = self
+                            .sessions
+                            .iter()
                             .find(|entry| entry.session_id == session_id)
                             .map(|entry| entry.cwd.clone());
                         self.preset_target_session_id = Some(session_id);
@@ -1721,8 +1720,7 @@ mod tests {
         preset_request_completed, preset_target_session_index, project_session_indices,
         restore_window_position, selected_session_index, session_activity_rank,
         should_apply_geometry, size_from_config, visible_on_monitor, window_size, ConfigKey,
-        PendingPresetRequest, PresetScope, SessionInfo,
-        WindowGeometryKey, GAP,
+        PendingPresetRequest, PresetScope, SessionInfo, WindowGeometryKey, GAP,
     };
     use crate::state::{CompanionAgentDetail, CompanionConfigState, CompanionPresetState};
 
@@ -1925,7 +1923,10 @@ mod tests {
         assert_eq!(sessions[displayed_idx].cwd, "/work/alpha");
         assert_eq!(sessions[edit_idx.unwrap()].cwd, "/work/beta");
         assert_eq!(selected_session_index(&sessions, Some("alpha")), Some(0));
-        assert_eq!(preset_target_session_index(&sessions, Some("gone"), 0), None);
+        assert_eq!(
+            preset_target_session_index(&sessions, Some("gone"), 0),
+            None
+        );
         assert_eq!(preset_target_session_index(&sessions, None, 0), Some(0));
 
         let original = WindowGeometryKey {
@@ -1965,7 +1966,10 @@ mod tests {
         let sessions = vec![alpha];
         let displayed = selected_session_index(&sessions, Some("displayed")).unwrap();
         let editing = preset_target_session_index(&sessions, Some("gone-beta"), displayed);
-        assert_eq!(editing, None, "the missing editor must never write to alpha");
+        assert_eq!(
+            editing, None,
+            "the missing editor must never write to alpha"
+        );
         assert_eq!(sessions[displayed].cwd, "/projects/alpha");
     }
 
