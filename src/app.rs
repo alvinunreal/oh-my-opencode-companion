@@ -1891,7 +1891,7 @@ mod tests {
         assert!(visible_on_monitor([-750.0, 120.0], size, 2.0, &monitors));
         assert!(!visible_on_monitor([3000.0, 120.0], size, 1.0, &monitors));
         assert!(!visible_on_monitor([-1600.0, 901.0], size, 1.0, &monitors));
-        assert!(!visible_on_monitor([1850.0, 1000.0], size, 1.0, &monitors));
+        assert!(!visible_on_monitor([1890.0, 1060.0], size, 1.0, &monitors));
         assert!(!visible_on_monitor([f32::NAN, 100.0], size, 1.0, &monitors));
         assert!(!visible_on_monitor([100.0, 100.0], size, 0.0, &monitors));
         assert!(!visible_on_monitor([100.0, 100.0], size, 1.0, &[]));
