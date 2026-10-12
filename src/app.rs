@@ -833,7 +833,12 @@ impl eframe::App for CompanionApp {
                 preset_target.preset = known.preset.clone();
                 preset_target.status = "offline".to_string();
             } else {
-                self.menu_known_target_cwd = None;
+                // A remembered target can be evicted while the popup is open.
+                // Preserve its name and block editing; never silently fall
+                // back to the old live target or the displayed session.
+                preset_target.cwd = cwd.to_string();
+                preset_target.preset = None;
+                preset_target.status = "unavailable".to_string();
             }
         }
         if let Some(next_attention_key) = attention_key(&session) {
