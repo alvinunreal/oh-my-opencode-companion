@@ -32,6 +32,7 @@ const MENU_JUST_OPENED_KEY: &str = "companion_menu_just_opened";
 const MENU_PROJECT_QUERY_KEY: &str = "companion_menu_project_query";
 const MENU_SHOW_OPEN_KEY: &str = "companion_menu_show_open";
 const MENU_SHOW_KNOWN_KEY: &str = "companion_menu_show_known";
+const MENU_POPUP_FOCUSED_KEY: &str = "companion_menu_popup_focused";
 const PRESET_SCOPE_GLOBAL_KEY: &str = "companion_preset_scope_global";
 const PROJECT_OPEN_PENDING_KEY: &str = "companion_project_open_pending";
 const PROJECT_OPEN_ERROR_KEY: &str = "companion_project_open_error";
@@ -1111,6 +1112,7 @@ impl eframe::App for CompanionApp {
                 d.insert_temp(egui::Id::new(MENU_POS_KEY), [cursor.x, cursor.y]);
                 d.insert_temp(egui::Id::new(MENU_OPEN_KEY), true);
                 d.insert_temp(egui::Id::new(MENU_JUST_OPENED_KEY), true);
+                d.insert_temp(egui::Id::new(MENU_POPUP_FOCUSED_KEY), false);
             });
         }
 
@@ -1373,6 +1375,37 @@ fn start_project_directory_open(ctx: &egui::Context, session_id: &str, path: &st
     }
 }
 
+fn popup_position_for_monitors(
+    pointer: [f32; 2],
+    popup: [f32; 2],
+    points_to_pixels: f32,
+    monitors: &[[f32; 4]],
+) -> [f32; 2] {
+    if !pointer
+        .iter()
+        .chain(popup.iter())
+        .all(|coordinate| coordinate.is_finite())
+        || !points_to_pixels.is_finite()
+        || points_to_pixels <= 0.0
+    {
+        return pointer;
+    }
+
+    let p = [pointer[0] * points_to_pixels, pointer[1] * points_to_pixels];
+    let rect = monitors.iter().find(|rect| {
+        p[0] >= rect[0] && p[0] < rect[2] && p[1] >= rect[1] && p[1] < rect[3]
+    });
+    let Some(rect) = rect else {
+        return pointer;
+    };
+    let gap = 8.0;
+    let left = rect[0] / points_to_pixels + gap;
+    let top = rect[1] / points_to_pixels + gap;
+    let right = (rect[2] / points_to_pixels - popup[0] - gap).max(left);
+    let bottom = (rect[3] / points_to_pixels - popup[1] - gap).max(top);
+    [pointer[0].clamp(left, right), pointer[1].clamp(top, bottom)]
+}
+
 fn render_companion_menu(
     ctx: &egui::Context,
     sessions: &[SessionInfo],
@@ -1396,7 +1429,18 @@ fn render_companion_menu(
         .input(|input| input.viewport().outer_rect)
         .map(|rect| rect.min)
         .unwrap_or(egui::Pos2::ZERO);
-    let popup_position = egui::pos2(origin.x + menu_pos[0], origin.y + menu_pos[1]);
+    let desired = [origin.x + menu_pos[0], origin.y + menu_pos[1]];
+    #[cfg(target_os = "windows")]
+    let popup = {
+        let scale = ctx.input(|input| {
+            input.viewport().native_pixels_per_point.unwrap_or(1.0)
+        });
+        let monitors = crate::screen::monitor_rects_physical().unwrap_or_default();
+        popup_position_for_monitors(desired, [POPUP_W, POPUP_H], scale, &monitors)
+    };
+    #[cfg(not(target_os = "windows"))]
+    let popup = desired;
+    let popup_position = egui::pos2(popup[0], popup[1]);
     let mut selected: Option<CompanionMenuAction> = None;
 
     // Native eframe viewport: no clipping to the GIF-sized root viewport,
@@ -1413,8 +1457,20 @@ fn render_companion_menu(
             .with_always_on_top()
             .with_active(true),
         |popup_ctx, _class| {
+            let was_focused = ctx.data(|data| {
+                data.get_temp::<bool>(egui::Id::new(MENU_POPUP_FOCUSED_KEY))
+                    .unwrap_or(false)
+            });
+            let focused = popup_ctx.input(|input| input.viewport().focused);
+            if focused == Some(true) {
+                ctx.data_mut(|data| {
+                    data.insert_temp(egui::Id::new(MENU_POPUP_FOCUSED_KEY), true);
+                });
+            }
             let should_close = popup_ctx.input(|input| {
-                input.key_pressed(egui::Key::Escape) || input.viewport().close_requested()
+                input.key_pressed(egui::Key::Escape)
+                    || input.viewport().close_requested()
+                    || (was_focused && focused == Some(false))
             });
             if should_close {
                 ctx.data_mut(|d| d.insert_temp(egui::Id::new(MENU_OPEN_KEY), false));
@@ -1738,8 +1794,8 @@ mod tests {
         adjacent_preset, adjacent_project_session_index, agent_detail_tooltip, apply_config,
         attention_key, attention_stroke, attention_type_for_status, choose_session, config_key,
         grid_dims, handle_drag_start, pending_preset_request_should_clear, place_window,
-        preset_request_completed, preset_target_session_index, project_session_indices,
-        restore_window_position, selected_session_index, should_apply_geometry, size_from_config,
+        popup_position_for_monitors, preset_request_completed, preset_target_session_index,
+        project_session_indices, restore_window_position, selected_session_index, should_apply_geometry, size_from_config,
         visible_on_monitor, window_size, ConfigKey, PendingPresetRequest, PresetMenuAction,
         PresetScope, SessionInfo, WindowGeometryKey, GAP,
     };
@@ -1878,6 +1934,28 @@ mod tests {
             session("active", "busy", &["fixer"]),
         ];
         assert_eq!(selected_session_index(&sessions, Some("gone")), Some(1));
+    }
+
+    #[test]
+    fn native_popup_clamps_near_screen_edges_and_negative_monitor_origins() {
+        let screens = [[0.0, 0.0, 1920.0, 1080.0], [-1600.0, 0.0, 0.0, 900.0]];
+        let popup = [382.0, 460.0];
+        assert_eq!(
+            popup_position_for_monitors([1900.0, 1000.0], popup, 1.0, &screens),
+            [1530.0, 612.0]
+        );
+        assert_eq!(
+            popup_position_for_monitors([-1580.0, 100.0], popup, 1.0, &screens),
+            [-1580.0, 100.0]
+        );
+        assert_eq!(
+            popup_position_for_monitors([-50.0, 890.0], popup, 1.0, &screens),
+            [-390.0, 432.0]
+        );
+        assert_eq!(
+            popup_position_for_monitors([1850.0, 900.0], popup, 2.0, &screens),
+            [1850.0, 900.0]
+        );
     }
 
     #[test]
