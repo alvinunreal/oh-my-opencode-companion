@@ -426,7 +426,6 @@ impl PresetScope {
             Self::Global => "global",
         }
     }
-
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1652,13 +1651,13 @@ fn is_pid_alive(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_detail_tooltip, apply_config,
-        attention_key, attention_stroke, attention_type_for_status, choose_session, config_key,
-        grid_dims, handle_drag_start, pending_preset_request_should_clear, place_window,
-        popup_position_for_monitors, preset_request_completed, preset_target_session_index,
-        project_session_indices, restore_window_position, selected_session_index,
-        should_apply_geometry, size_from_config, visible_on_monitor, window_size, ConfigKey,
-        PendingPresetRequest, PresetScope, SessionInfo, WindowGeometryKey, GAP,
+        agent_detail_tooltip, apply_config, attention_key, attention_stroke,
+        attention_type_for_status, choose_session, config_key, grid_dims, handle_drag_start,
+        pending_preset_request_should_clear, place_window, popup_position_for_monitors,
+        preset_request_completed, preset_target_session_index, project_session_indices,
+        restore_window_position, selected_session_index, should_apply_geometry, size_from_config,
+        visible_on_monitor, window_size, ConfigKey, PendingPresetRequest, PresetScope, SessionInfo,
+        WindowGeometryKey, GAP,
     };
     use crate::state::{CompanionAgentDetail, CompanionConfigState, CompanionPresetState};
 
@@ -1814,13 +1813,14 @@ mod tests {
             egui::Vec2::new(1920.0, 1080.0),
         ));
         let output = ctx.run(input, |ctx| {
-            assert!(super::render_companion_menu(ctx, &sessions, &[], &sessions[1], false).is_none());
+            assert!(
+                super::render_companion_menu(ctx, &sessions, &[], &sessions[1], false).is_none()
+            );
         });
         let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
-        assert!(!commands.iter().any(|command| matches!(
-            command,
-            egui::ViewportCommand::OuterPosition(_)
-        )));
+        assert!(!commands
+            .iter()
+            .any(|command| matches!(command, egui::ViewportCommand::OuterPosition(_))));
     }
 
     #[test]
