@@ -1798,6 +1798,32 @@ mod tests {
     }
 
     #[test]
+    fn popup_renders_without_repositioning_the_animation_viewport() {
+        let ctx = egui::Context::default();
+        let sessions = vec![
+            session("display", "busy", &["fixer"]),
+            session("edit", "idle", &["intro"]),
+        ];
+        ctx.data_mut(|data| {
+            data.insert_temp(egui::Id::new(super::MENU_OPEN_KEY), true);
+            data.insert_temp(egui::Id::new(super::MENU_POS_KEY), [20.0, 20.0]);
+        });
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1920.0, 1080.0),
+        ));
+        let output = ctx.run(input, |ctx| {
+            assert!(super::render_companion_menu(ctx, &sessions, &[], &sessions[1], false).is_none());
+        });
+        let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert!(!commands.iter().any(|command| matches!(
+            command,
+            egui::ViewportCommand::OuterPosition(_)
+        )));
+    }
+
+    #[test]
     fn native_popup_clamps_near_screen_edges_and_negative_monitor_origins() {
         let screens = [[0.0, 0.0, 1920.0, 1080.0], [-1600.0, 0.0, 0.0, 900.0]];
         let popup = [382.0, 460.0];
