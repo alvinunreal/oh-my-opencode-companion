@@ -1350,7 +1350,10 @@ fn render_companion_menu(
     target: &SessionInfo,
     preset_pending: bool,
 ) -> Option<CompanionMenuAction> {
-    let open = ctx.data(|d| d.get_temp::<bool>(egui::Id::new(MENU_OPEN_KEY)).unwrap_or(false));
+    let open = ctx.data(|d| {
+        d.get_temp::<bool>(egui::Id::new(MENU_OPEN_KEY))
+            .unwrap_or(false)
+    });
     if !open {
         return None;
     }
@@ -1512,8 +1515,9 @@ fn render_companion_menu(
 
                     if let Some(preset_state) = &target.preset {
                         let current = match scope {
-                            PresetScope::Project => project_current(preset_state)
-                                .unwrap_or("Inherit"),
+                            PresetScope::Project => {
+                                project_current(preset_state).unwrap_or("Inherit")
+                            }
                             PresetScope::Global => preset_state.global.as_deref().unwrap_or("None"),
                         };
                         ui.add_enabled_ui(!preset_pending, |ui| {
@@ -1579,7 +1583,10 @@ fn render_companion_menu(
                     ui.horizontal(|ui| {
                         ui.label("Overlay size:");
                         for (label, preset) in SIZE_PRESETS {
-                            if ui.selectable_label((size - preset).abs() < 0.5, *label).clicked() {
+                            if ui
+                                .selectable_label((size - preset).abs() < 0.5, *label)
+                                .clicked()
+                            {
                                 ctx.data_mut(|d| d.insert_temp(egui::Id::new(SIZE_KEY), *preset));
                             }
                         }
@@ -1587,7 +1594,11 @@ fn render_companion_menu(
 
                     ui.horizontal(|ui| {
                         if ui.button("Open project folder").clicked() {
-                            start_project_directory_open(popup_ctx, &target.session_id, &target.cwd);
+                            start_project_directory_open(
+                                popup_ctx,
+                                &target.session_id,
+                                &target.cwd,
+                            );
                         }
                         if ui.button("Copy path").clicked() {
                             popup_ctx.copy_text(target.cwd.clone());
