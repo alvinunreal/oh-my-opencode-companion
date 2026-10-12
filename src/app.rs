@@ -1722,9 +1722,10 @@ mod tests {
         adjacent_preset, adjacent_project_session_index, agent_detail_tooltip, apply_config,
         attention_key, attention_stroke, attention_type_for_status, choose_session, config_key,
         grid_dims, handle_drag_start, pending_preset_request_should_clear, place_window,
-        preset_request_completed, project_session_indices, restore_window_position,
-        selected_session_index, should_apply_geometry, size_from_config, window_size, ConfigKey,
-        PendingPresetRequest, PresetMenuAction, PresetScope, SessionInfo, WindowGeometryKey, GAP,
+        preset_request_completed, preset_target_session_index, project_session_indices,
+        restore_window_position, selected_session_index, should_apply_geometry, size_from_config,
+        visible_on_monitor, window_size, ConfigKey, PendingPresetRequest, PresetMenuAction,
+        PresetScope, SessionInfo, WindowGeometryKey, GAP,
     };
     use crate::state::{CompanionAgentDetail, CompanionConfigState, CompanionPresetState};
 
