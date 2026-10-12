@@ -1585,23 +1585,40 @@ fn render_companion_menu(
                         }
                     });
 
+                    let opening = popup_ctx.data(|data| {
+                        data.get_temp::<bool>(project_open_pending_id(&target.cwd))
+                            .unwrap_or(false)
+                    });
+                    let open_error = popup_ctx.data(|data| {
+                        data.get_temp::<String>(project_open_error_id(&target.cwd))
+                            .unwrap_or_default()
+                    });
                     ui.horizontal(|ui| {
-                        if ui.button("Open project folder").clicked() {
-                            start_project_directory_open(
-                                popup_ctx,
-                                &target.session_id,
-                                &target.cwd,
-                            );
+                        if ui
+                            .add_enabled(
+                                !opening,
+                                egui::Button::new(if opening {
+                                    "Opening…"
+                                } else {
+                                    "Open project folder"
+                                }),
+                            )
+                            .clicked()
+                        {
+                            start_project_directory_open(popup_ctx, &target.cwd, &target.cwd);
                         }
                         if ui.button("Copy path").clicked() {
                             popup_ctx.copy_text(target.cwd.clone());
                         }
-                        if ui.button("Quit Companion").clicked() {
-                            ctx.data_mut(|d| {
-                                d.insert_temp(egui::Id::new("companion_quit"), true);
+                        if ui.button("Quit").on_hover_text("Quit Companion").clicked() {
+                            ctx.data_mut(|data| {
+                                data.insert_temp(egui::Id::new("companion_quit"), true);
                             });
                         }
                     });
+                    if !open_error.is_empty() {
+                        ui.colored_label(egui::Color32::LIGHT_RED, open_error);
+                    }
                 });
         },
     );
