@@ -1392,9 +1392,9 @@ fn popup_position_for_monitors(
     }
 
     let p = [pointer[0] * points_to_pixels, pointer[1] * points_to_pixels];
-    let rect = monitors.iter().find(|rect| {
-        p[0] >= rect[0] && p[0] < rect[2] && p[1] >= rect[1] && p[1] < rect[3]
-    });
+    let rect = monitors
+        .iter()
+        .find(|rect| p[0] >= rect[0] && p[0] < rect[2] && p[1] >= rect[1] && p[1] < rect[3]);
     let Some(rect) = rect else {
         return pointer;
     };
@@ -1432,9 +1432,7 @@ fn render_companion_menu(
     let desired = [origin.x + menu_pos[0], origin.y + menu_pos[1]];
     #[cfg(target_os = "windows")]
     let popup = {
-        let scale = ctx.input(|input| {
-            input.viewport().native_pixels_per_point.unwrap_or(1.0)
-        });
+        let scale = ctx.input(|input| input.viewport().native_pixels_per_point.unwrap_or(1.0));
         let monitors = crate::screen::monitor_rects_physical().unwrap_or_default();
         popup_position_for_monitors(desired, [POPUP_W, POPUP_H], scale, &monitors)
     };
@@ -1795,9 +1793,9 @@ mod tests {
         attention_key, attention_stroke, attention_type_for_status, choose_session, config_key,
         grid_dims, handle_drag_start, pending_preset_request_should_clear, place_window,
         popup_position_for_monitors, preset_request_completed, preset_target_session_index,
-        project_session_indices, restore_window_position, selected_session_index, should_apply_geometry, size_from_config,
-        visible_on_monitor, window_size, ConfigKey, PendingPresetRequest, PresetMenuAction,
-        PresetScope, SessionInfo, WindowGeometryKey, GAP,
+        project_session_indices, restore_window_position, selected_session_index,
+        should_apply_geometry, size_from_config, visible_on_monitor, window_size, ConfigKey,
+        PendingPresetRequest, PresetMenuAction, PresetScope, SessionInfo, WindowGeometryKey, GAP,
     };
     use crate::state::{CompanionAgentDetail, CompanionConfigState, CompanionPresetState};
 
