@@ -235,6 +235,62 @@ fn restore_window_position(pos: [f32; 2], screen: [f32; 2], win: [f32; 2]) -> [f
     }
 }
 
+fn visible_on_monitor(
+    position: [f32; 2],
+    size: [f32; 2],
+    native_pixels_per_point: f32,
+    monitors: &[[f32; 4]],
+) -> bool {
+    if !position.iter().chain(size.iter()).all(|value| value.is_finite())
+        || !native_pixels_per_point.is_finite()
+        || native_pixels_per_point <= 0.0
+        || size[0] <= 0.0
+        || size[1] <= 0.0
+    {
+        return false;
+    }
+
+    // egui viewport geometry is in logical points; Win32 EnumDisplayMonitors
+    // returns physical virtual-desktop coordinates, including negative origins.
+    let x = position[0] * native_pixels_per_point;
+    let y = position[1] * native_pixels_per_point;
+    let width = size[0] * native_pixels_per_point;
+    let height = size[1] * native_pixels_per_point;
+    let min_visible_w = width.min(48.0 * native_pixels_per_point);
+    let min_visible_h = height.min(48.0 * native_pixels_per_point);
+
+    monitors.iter().any(|rect| {
+        let overlap_w = (x + width).min(rect[2]) - x.max(rect[0]);
+        let overlap_h = (y + height).min(rect[3]) - y.max(rect[1]);
+        overlap_w >= min_visible_w && overlap_h >= min_visible_h
+    })
+}
+
+fn validated_saved_window_position(
+    position: [f32; 2],
+    screen: [f32; 2],
+    size: [f32; 2],
+    native_pixels_per_point: f32,
+) -> Option<[f32; 2]> {
+    if !position.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let monitors = crate::screen::monitor_rects_physical()?;
+        let _ = screen;
+        visible_on_monitor(position, size, native_pixels_per_point, &monitors)
+            .then_some(position)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = native_pixels_per_point;
+        Some(restore_window_position(position, screen, size))
+    }
+}
+
 fn stack_window_position(
     position: [f32; 2],
     anchor: &str,
@@ -625,6 +681,7 @@ pub struct CompanionApp {
     project_keys: std::collections::BTreeMap<String, String>,
     drag_project_key: Option<String>,
     menu_target_session_id: Option<String>,
+    preset_target_session_id: Option<String>,
     last_attention_key: Option<(String, u64)>,
     preset_request_seq: u64,
     position_write_generation: Arc<AtomicU64>,
@@ -691,6 +748,7 @@ impl CompanionApp {
             project_keys: std::collections::BTreeMap::new(),
             drag_project_key: None,
             menu_target_session_id: None,
+            preset_target_session_id: None,
             last_attention_key: None,
             preset_request_seq: 0,
             position_write_generation: Arc::new(AtomicU64::new(0)),
@@ -818,6 +876,7 @@ impl eframe::App for CompanionApp {
         });
         if !menu_open {
             self.menu_target_session_id = None;
+            self.preset_target_session_id = None;
         }
         let pinned_session = if menu_open {
             self.menu_target_session_id.as_deref()
@@ -838,6 +897,19 @@ impl eframe::App for CompanionApp {
         };
 
         let session = self.sessions[selected_idx].clone();
+        // A menu's editing target must never replace the displayed animation
+        // session. Keeping the display pinned also prevents background activity
+        // from stealing the visible session while the user edits presets.
+        let preset_target_idx = self
+            .preset_target_session_id
+            .as_deref()
+            .and_then(|target_id| {
+                self.sessions
+                    .iter()
+                    .position(|entry| entry.session_id == target_id)
+            })
+            .unwrap_or(selected_idx);
+        let preset_target = self.sessions[preset_target_idx].clone();
         if let Some(next_attention_key) = attention_key(&session) {
             if self.last_attention_key.as_ref() != Some(&next_attention_key) {
                 if let Some(attention) = attention_type_for_status(&session.status) {
@@ -869,6 +941,9 @@ impl eframe::App for CompanionApp {
         }
         let project_key = self.project_key_for(&session.cwd);
         let saved_position = self.window_positions.get(&project_key).copied();
+        let pixels_per_point = ctx
+            .input(|input| input.viewport().native_pixels_per_point)
+            .unwrap_or(1.0);
         let time_seconds = ctx.input(|input| input.time);
         let agent_frames: Vec<(usize, AnimationFrame)> = if session.active_agents.is_empty() {
             self.gifs
@@ -927,17 +1002,28 @@ impl eframe::App for CompanionApp {
             &geometry,
         ) {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
-            let pos = saved_position
-                .map(|pos| restore_window_position([pos.x, pos.y], self.screen, [win_w, win_h]))
-                .unwrap_or_else(|| {
-                    stack_window_position(
-                        place_window(&self.position, self.screen, [win_w, win_h]),
-                        &self.position,
-                        selected_idx,
-                        self.screen,
-                        [win_w, win_h],
-                    )
-                });
+            let validated_position = saved_position.and_then(|pos| {
+                validated_saved_window_position(
+                    [pos.x, pos.y],
+                    self.screen,
+                    [win_w, win_h],
+                    pixels_per_point,
+                )
+            });
+            if saved_position.is_some() && validated_position.is_none() {
+                crate::log::debug(format!(
+                    "invalid/off-screen saved geometry for project={project_key:?}; using visible anchor"
+                ));
+            }
+            let pos = validated_position.unwrap_or_else(|| {
+                stack_window_position(
+                    place_window(&self.position, self.screen, [win_w, win_h]),
+                    &self.position,
+                    selected_idx,
+                    self.screen,
+                    [win_w, win_h],
+                )
+            });
             crate::log::debug(format!(
                 "geometry owner={:?} session_id={} saved_position={:?} pos={:?} win=({}, {}) screen={:?} selected_idx={}",
                 self.owner_session_id,
@@ -986,6 +1072,7 @@ impl eframe::App for CompanionApp {
         if ctx.input(|i| i.pointer.secondary_released()) {
             let cursor = ctx.input(|i| i.pointer.interact_pos()).unwrap_or_default();
             self.menu_target_session_id = Some(session.session_id.clone());
+            self.preset_target_session_id = Some(session.session_id.clone());
             ctx.data_mut(|d| {
                 d.insert_temp(egui::Id::new(MENU_POS_KEY), [cursor.x, cursor.y]);
                 d.insert_temp(egui::Id::new(MENU_OPEN_KEY), true);
@@ -1009,17 +1096,17 @@ impl eframe::App for CompanionApp {
             win_w,
             win_h,
             &self.sessions,
-            &session,
+            &preset_target,
             self.pending_preset_request.is_some(),
         ) {
             match action {
                 CompanionMenuAction::SelectProject(direction) => {
                     if let Some(next_index) = adjacent_project_session_index(
                         &self.sessions,
-                        &session.session_id,
+                        &preset_target.session_id,
                         direction,
                     ) {
-                        self.menu_target_session_id =
+                        self.preset_target_session_id =
                             Some(self.sessions[next_index].session_id.clone());
                     }
                 }
@@ -1028,7 +1115,7 @@ impl eframe::App for CompanionApp {
                     let request_id = format!("{}-{}", std::process::id(), self.preset_request_seq);
                     let request = CompanionPresetRequest {
                         request_id: request_id.clone(),
-                        session_id: session.session_id.clone(),
+                        session_id: preset_target.session_id.clone(),
                         scope: action.scope.as_str().to_string(),
                         preset: action.preset,
                         inherit: action.inherit,
