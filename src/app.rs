@@ -1921,11 +1921,12 @@ mod tests {
         let displayed_idx = selected_session_index(&sessions, Some("alpha")).unwrap();
         let edit_idx = preset_target_session_index(&sessions, Some("beta"), displayed_idx);
         assert_eq!(displayed_idx, 0);
-        assert_eq!(edit_idx, 1);
+        assert_eq!(edit_idx, Some(1));
         assert_eq!(sessions[displayed_idx].cwd, "/work/alpha");
-        assert_eq!(sessions[edit_idx].cwd, "/work/beta");
+        assert_eq!(sessions[edit_idx.unwrap()].cwd, "/work/beta");
         assert_eq!(selected_session_index(&sessions, Some("alpha")), Some(0));
-        assert_eq!(preset_target_session_index(&sessions, Some("gone"), 0), 0);
+        assert_eq!(preset_target_session_index(&sessions, Some("gone"), 0), None);
+        assert_eq!(preset_target_session_index(&sessions, None, 0), Some(0));
 
         let original = WindowGeometryKey {
             session_id: "alpha".into(),
@@ -1955,6 +1956,17 @@ mod tests {
         assert!(!visible_on_monitor([f32::NAN, 100.0], size, 1.0, &monitors));
         assert!(!visible_on_monitor([100.0, 100.0], size, 0.0, &monitors));
         assert!(!visible_on_monitor([100.0, 100.0], size, 1.0, &[]));
+    }
+
+    #[test]
+    fn vanished_editor_target_does_not_fall_back_to_displayed_project() {
+        let mut alpha = session("displayed", "busy", &["fixer"]);
+        alpha.cwd = "/projects/alpha".into();
+        let sessions = vec![alpha];
+        let displayed = selected_session_index(&sessions, Some("displayed")).unwrap();
+        let editing = preset_target_session_index(&sessions, Some("gone-beta"), displayed);
+        assert_eq!(editing, None, "the missing editor must never write to alpha");
+        assert_eq!(sessions[displayed].cwd, "/projects/alpha");
     }
 
     #[test]
