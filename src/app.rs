@@ -12,8 +12,8 @@ use crate::niri;
 use crate::screen::primary_size;
 use crate::state::{
     read_state, start_watcher, write_preset_request, write_project_window_position,
-    CompanionAgentDetail, CompanionConfigState, CompanionPresetRequest, CompanionPresetState,
-    SessionInfo, WindowPositionState,
+    CompanionAgentDetail, CompanionConfigState, CompanionKnownProject, CompanionPresetRequest,
+    CompanionPresetState, SessionInfo, WindowPositionState,
 };
 
 const DEFAULT_SIZE: f32 = 120.0;
@@ -22,7 +22,7 @@ const GAP: f32 = 10.0;
 const SIZE_PRESETS: &[(&str, f32)] = &[("S", 80.0), ("M", 120.0), ("L", 160.0), ("XL", 200.0)];
 
 const POPUP_W: f32 = 382.0;
-const POPUP_H: f32 = 430.0;
+const POPUP_H: f32 = 460.0;
 const SURFACE_INSET: f32 = 1.0;
 
 const SIZE_KEY: &str = "companion_size";
@@ -31,6 +31,7 @@ const MENU_POS_KEY: &str = "companion_menu_pos";
 const MENU_JUST_OPENED_KEY: &str = "companion_menu_just_opened";
 const MENU_PROJECT_QUERY_KEY: &str = "companion_menu_project_query";
 const MENU_SHOW_OPEN_KEY: &str = "companion_menu_show_open";
+const MENU_SHOW_KNOWN_KEY: &str = "companion_menu_show_known";
 const PRESET_SCOPE_GLOBAL_KEY: &str = "companion_preset_scope_global";
 const PROJECT_OPEN_PENDING_KEY: &str = "companion_project_open_pending";
 const PROJECT_OPEN_ERROR_KEY: &str = "companion_project_open_error";
@@ -463,6 +464,7 @@ struct PresetMenuAction {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CompanionMenuAction {
     SelectProject(String),
+    SelectKnownProject(String),
     SelectPreset(PresetMenuAction),
 }
 
@@ -681,6 +683,7 @@ pub struct CompanionApp {
     state_path: std::path::PathBuf,
     owner_session_id: Option<String>,
     sessions: Vec<SessionInfo>,
+    known_projects: Vec<CompanionKnownProject>,
     gifs: Gifs,
     rx: Receiver<()>,
     registered: bool,
@@ -699,6 +702,7 @@ pub struct CompanionApp {
     drag_project_key: Option<String>,
     menu_target_session_id: Option<String>,
     preset_target_session_id: Option<String>,
+    menu_known_target_cwd: Option<String>,
     last_attention_key: Option<(String, u64)>,
     preset_request_seq: u64,
     position_write_generation: Arc<AtomicU64>,
@@ -720,6 +724,7 @@ impl CompanionApp {
             state.sessions.len()
         ));
         let sessions = state.sessions;
+        let known_projects = state.known_projects;
         let window_positions = state.window_positions;
 
         let mut initial_size = DEFAULT_SIZE;
@@ -748,6 +753,7 @@ impl CompanionApp {
             state_path,
             owner_session_id,
             sessions,
+            known_projects,
             gifs: Gifs::new(),
             rx,
             registered: false,
@@ -766,6 +772,7 @@ impl CompanionApp {
             drag_project_key: None,
             menu_target_session_id: None,
             preset_target_session_id: None,
+            menu_known_target_cwd: None,
             last_attention_key: None,
             preset_request_seq: 0,
             position_write_generation: Arc::new(AtomicU64::new(0)),
@@ -788,6 +795,7 @@ impl CompanionApp {
                 self.pending_preset_request = None;
             }
             self.sessions = state.sessions;
+            self.known_projects = state.known_projects;
             let owned_config = config_for_owner(
                 &self.sessions,
                 self.owner_session_id.as_deref(),
@@ -894,6 +902,7 @@ impl eframe::App for CompanionApp {
         if !menu_open {
             self.menu_target_session_id = None;
             self.preset_target_session_id = None;
+            self.menu_known_target_cwd = None;
         }
         let pinned_session = if menu_open {
             self.menu_target_session_id.as_deref()
@@ -922,7 +931,19 @@ impl eframe::App for CompanionApp {
             self.preset_target_session_id.as_deref(),
             selected_idx,
         );
-        let preset_target = self.sessions[preset_target_idx].clone();
+        let mut preset_target = self.sessions[preset_target_idx].clone();
+        if let Some(cwd) = self.menu_known_target_cwd.as_deref() {
+            if let Some(known) = self.known_projects.iter().find(|known| known.cwd == cwd) {
+                // A remembered project has no running manager; route its action
+                // via the currently displayed live manager without displaying it.
+                preset_target.session_id = session.session_id.clone();
+                preset_target.cwd = known.cwd.clone();
+                preset_target.preset = known.preset.clone();
+                preset_target.status = "offline".to_string();
+            } else {
+                self.menu_known_target_cwd = None;
+            }
+        }
         if let Some(next_attention_key) = attention_key(&session) {
             if self.last_attention_key.as_ref() != Some(&next_attention_key) {
                 if let Some(attention) = attention_type_for_status(&session.status) {
@@ -1107,6 +1128,7 @@ impl eframe::App for CompanionApp {
         if let Some(action) = render_companion_menu(
             ctx,
             &self.sessions,
+            &self.known_projects,
             &preset_target,
             self.pending_preset_request.is_some(),
         ) {
@@ -1114,6 +1136,12 @@ impl eframe::App for CompanionApp {
                 CompanionMenuAction::SelectProject(session_id) => {
                     if self.sessions.iter().any(|s| s.session_id == session_id) {
                         self.preset_target_session_id = Some(session_id);
+                        self.menu_known_target_cwd = None;
+                    }
+                }
+                CompanionMenuAction::SelectKnownProject(cwd) => {
+                    if self.known_projects.iter().any(|known| known.cwd == cwd) {
+                        self.menu_known_target_cwd = Some(cwd);
                     }
                 }
                 CompanionMenuAction::SelectPreset(action) => {
@@ -1122,6 +1150,7 @@ impl eframe::App for CompanionApp {
                     let request = CompanionPresetRequest {
                         request_id: request_id.clone(),
                         session_id: preset_target.session_id.clone(),
+                        target_cwd: self.menu_known_target_cwd.clone(),
                         scope: action.scope.as_str().to_string(),
                         preset: action.preset,
                         inherit: action.inherit,
@@ -1347,6 +1376,7 @@ fn start_project_directory_open(ctx: &egui::Context, session_id: &str, path: &st
 fn render_companion_menu(
     ctx: &egui::Context,
     sessions: &[SessionInfo],
+    known_projects: &[CompanionKnownProject],
     target: &SessionInfo,
     preset_pending: bool,
 ) -> Option<CompanionMenuAction> {
@@ -1409,15 +1439,16 @@ fn render_companion_menu(
                     ui.separator();
 
                     ui.label(egui::RichText::new("Preset target").strong());
-                    let mut show_open = ctx
-                        .data(|d| d.get_temp::<bool>(egui::Id::new(MENU_SHOW_OPEN_KEY)))
-                        .unwrap_or(false);
+                    let mut view = ctx
+                        .data(|d| d.get_temp::<u8>(egui::Id::new(MENU_SHOW_KNOWN_KEY)))
+                        .unwrap_or(0);
                     ui.horizontal(|ui| {
-                        ui.selectable_value(&mut show_open, false, "Active");
-                        ui.selectable_value(&mut show_open, true, "All open");
+                        ui.selectable_value(&mut view, 0, "Active");
+                        ui.selectable_value(&mut view, 1, "All open");
+                        ui.selectable_value(&mut view, 2, "Known");
                     });
                     ctx.data_mut(|d| {
-                        d.insert_temp(egui::Id::new(MENU_SHOW_OPEN_KEY), show_open);
+                        d.insert_temp(egui::Id::new(MENU_SHOW_KNOWN_KEY), view);
                     });
 
                     let mut query: String = ctx
@@ -1425,7 +1456,7 @@ fn render_companion_menu(
                         .unwrap_or_default();
                     ui.add(
                         egui::TextEdit::singleline(&mut query)
-                            .hint_text("Search open projects or paths"),
+                            .hint_text("Search projects or paths"),
                     );
                     ctx.data_mut(|d| {
                         d.insert_temp(egui::Id::new(MENU_PROJECT_QUERY_KEY), query.clone());
@@ -1436,12 +1467,48 @@ fn render_companion_menu(
                         .id_source("companion-project-list")
                         .max_height(126.0)
                         .show(ui, |ui| {
+                            if view == 2 {
+                                for known in known_projects.iter().rev() {
+                                    let name = project_display_name(&known.cwd);
+                                    if !query.trim().is_empty()
+                                        && !name.to_lowercase().contains(&query.to_lowercase())
+                                        && !known.cwd.to_lowercase().contains(&query.to_lowercase())
+                                    {
+                                        continue;
+                                    }
+                                    matches += 1;
+                                    let live = sessions.iter().find(|s| s.cwd == known.cwd);
+                                    let label = if live.is_some() { "Open" } else { "Remembered" };
+                                    if ui
+                                        .selectable_label(
+                                            target.cwd == known.cwd,
+                                            format!("{name}  ·  {label}"),
+                                        )
+                                        .on_hover_text(&known.cwd)
+                                        .clicked()
+                                    {
+                                        selected = Some(match live {
+                                            Some(live) => CompanionMenuAction::SelectProject(
+                                                live.session_id.clone(),
+                                            ),
+                                            None => CompanionMenuAction::SelectKnownProject(
+                                                known.cwd.clone(),
+                                            ),
+                                        });
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(&known.cwd)
+                                            .size(11.0)
+                                            .color(egui::Color32::GRAY),
+                                    );
+                                }
+                            } else {
                             for index in project_session_indices(sessions) {
                                 let project = &sessions[index];
                                 let active = project.status == "busy"
                                     || project.status == "waiting-input"
                                     || project.active_agents.iter().any(|agent| agent != "intro");
-                                if !show_open && !active {
+                                if view == 0 && !active {
                                     continue;
                                 }
                                 let name = project_display_name(&project.cwd);
@@ -1477,10 +1544,11 @@ fn render_companion_menu(
                                         .color(egui::Color32::GRAY),
                                 );
                             }
+                            }
                         });
                     if matches == 0 {
                         ui.label(
-                            egui::RichText::new("No matching projects. Try All open.")
+                            egui::RichText::new("No matching projects in this view.")
                                 .color(egui::Color32::GRAY),
                         );
                     }
@@ -1513,6 +1581,13 @@ fn render_companion_menu(
                         );
                     });
 
+                    if target.status == "offline" {
+                        ui.label(
+                            egui::RichText::new("Remembered project · preset catalog may be stale")
+                                .size(11.0)
+                                .color(egui::Color32::YELLOW),
+                        );
+                    }
                     if let Some(preset_state) = &target.preset {
                         let current = match scope {
                             PresetScope::Project => {
