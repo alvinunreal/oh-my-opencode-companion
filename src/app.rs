@@ -619,6 +619,20 @@ fn selected_session_index(
         .or_else(|| choose_session(sessions))
 }
 
+fn preset_target_session_index(
+    sessions: &[SessionInfo],
+    preset_target_id: Option<&str>,
+    displayed_idx: usize,
+) -> usize {
+    preset_target_id
+        .and_then(|session_id| {
+            sessions
+                .iter()
+                .position(|entry| entry.session_id == session_id)
+        })
+        .unwrap_or(displayed_idx)
+}
+
 fn project_session_indices(sessions: &[SessionInfo]) -> Vec<usize> {
     let mut indices: Vec<usize> = Vec::new();
     for (index, session) in sessions.iter().enumerate() {
@@ -900,15 +914,11 @@ impl eframe::App for CompanionApp {
         // A menu's editing target must never replace the displayed animation
         // session. Keeping the display pinned also prevents background activity
         // from stealing the visible session while the user edits presets.
-        let preset_target_idx = self
-            .preset_target_session_id
-            .as_deref()
-            .and_then(|target_id| {
-                self.sessions
-                    .iter()
-                    .position(|entry| entry.session_id == target_id)
-            })
-            .unwrap_or(selected_idx);
+        let preset_target_idx = preset_target_session_index(
+            &self.sessions,
+            self.preset_target_session_id.as_deref(),
+            selected_idx,
+        );
         let preset_target = self.sessions[preset_target_idx].clone();
         if let Some(next_attention_key) = attention_key(&session) {
             if self.last_attention_key.as_ref() != Some(&next_attention_key) {
@@ -1838,6 +1848,53 @@ mod tests {
             session("active", "busy", &["fixer"]),
         ];
         assert_eq!(selected_session_index(&sessions, Some("gone")), Some(1));
+    }
+
+    #[test]
+    fn editing_project_does_not_change_displayed_session_or_geometry() {
+        let mut alpha = session("alpha", "idle", &["intro"]);
+        alpha.cwd = "/work/alpha".into();
+        let mut beta = session("beta", "waiting-input", &["input"]);
+        beta.cwd = "/work/beta".into();
+        let sessions = vec![alpha, beta];
+
+        let displayed_idx = selected_session_index(&sessions, Some("alpha")).unwrap();
+        let edit_idx = preset_target_session_index(&sessions, Some("beta"), displayed_idx);
+        assert_eq!(displayed_idx, 0);
+        assert_eq!(edit_idx, 1);
+        assert_eq!(sessions[displayed_idx].cwd, "/work/alpha");
+        assert_eq!(sessions[edit_idx].cwd, "/work/beta");
+        assert_eq!(selected_session_index(&sessions, Some("alpha")), Some(0));
+        assert_eq!(preset_target_session_index(&sessions, Some("gone"), 0), 0);
+
+        let original = WindowGeometryKey {
+            session_id: "alpha".into(),
+            project_key: "/work/alpha".into(),
+            position: "bottom-right".into(),
+            custom_x: Some(100),
+            custom_y: Some(100),
+            size_px: 120,
+            cols: 1,
+            rows: 1,
+            screen_w: 1920,
+            screen_h: 1080,
+        };
+        assert!(!should_apply_geometry(false, Some(&original), &original));
+    }
+
+    #[test]
+    fn saved_position_visible_only_if_recoverable_on_actual_monitor() {
+        let monitors = [[0.0, 0.0, 1920.0, 1080.0], [-1600.0, 0.0, 0.0, 900.0]];
+        let size = [120.0, 120.0];
+        assert!(visible_on_monitor([100.0, 100.0], size, 1.0, &monitors));
+        assert!(visible_on_monitor([-1500.0, 120.0], size, 1.0, &monitors));
+        assert!(visible_on_monitor([-750.0, 120.0], size, 2.0, &monitors));
+        assert!(!visible_on_monitor([3000.0, 120.0], size, 1.0, &monitors));
+        assert!(!visible_on_monitor([-1600.0, 901.0], size, 1.0, &monitors));
+        assert!(!visible_on_monitor([1850.0, 1000.0], size, 1.0, &monitors));
+        assert!(!visible_on_monitor([f32::NAN, 100.0], size, 1.0, &monitors));
+        assert!(!visible_on_monitor([100.0, 100.0], size, 0.0, &monitors));
+        assert!(!visible_on_monitor([100.0, 100.0], size, 1.0, &[]));
     }
 
     #[test]
