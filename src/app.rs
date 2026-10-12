@@ -509,14 +509,15 @@ fn preset_target_session_index(
     sessions: &[SessionInfo],
     preset_target_id: Option<&str>,
     displayed_idx: usize,
-) -> usize {
-    preset_target_id
-        .and_then(|session_id| {
-            sessions
-                .iter()
-                .position(|entry| entry.session_id == session_id)
-        })
-        .unwrap_or(displayed_idx)
+) -> Option<usize> {
+    // An explicitly selected editor session that has disappeared must stay
+    // unavailable. Never silently target the displayed (different) project.
+    match preset_target_id {
+        Some(session_id) => sessions
+            .iter()
+            .position(|entry| entry.session_id == session_id),
+        None => Some(displayed_idx),
+    }
 }
 
 fn project_session_indices(sessions: &[SessionInfo]) -> Vec<usize> {
@@ -566,6 +567,7 @@ pub struct CompanionApp {
     drag_project_key: Option<String>,
     menu_target_session_id: Option<String>,
     preset_target_session_id: Option<String>,
+    preset_target_cwd: Option<String>,
     menu_known_target_cwd: Option<String>,
     last_attention_key: Option<(String, u64)>,
     preset_request_seq: u64,
@@ -636,6 +638,7 @@ impl CompanionApp {
             drag_project_key: None,
             menu_target_session_id: None,
             preset_target_session_id: None,
+            preset_target_cwd: None,
             menu_known_target_cwd: None,
             last_attention_key: None,
             preset_request_seq: 0,
@@ -766,6 +769,7 @@ impl eframe::App for CompanionApp {
         if !menu_open {
             self.menu_target_session_id = None;
             self.preset_target_session_id = None;
+            self.preset_target_cwd = None;
             self.menu_known_target_cwd = None;
         }
         let pinned_session = if menu_open {
@@ -795,7 +799,18 @@ impl eframe::App for CompanionApp {
             self.preset_target_session_id.as_deref(),
             selected_idx,
         );
-        let mut preset_target = self.sessions[preset_target_idx].clone();
+        let mut preset_target = self.sessions[preset_target_idx.unwrap_or(selected_idx)].clone();
+        if preset_target_idx.is_none() {
+            // Preserve the selected project identity for diagnostics and
+            // actions, but disable preset writes until it is selected again.
+            preset_target.session_id = self
+                .preset_target_session_id
+                .clone()
+                .unwrap_or_default();
+            preset_target.cwd = self.preset_target_cwd.clone().unwrap_or_default();
+            preset_target.preset = None;
+            preset_target.status = "unavailable".to_string();
+        }
         if let Some(cwd) = self.menu_known_target_cwd.as_deref() {
             if let Some(known) = self.known_projects.iter().find(|known| known.cwd == cwd) {
                 // A remembered project has no running manager; route its action
@@ -971,6 +986,8 @@ impl eframe::App for CompanionApp {
             let cursor = ctx.input(|i| i.pointer.interact_pos()).unwrap_or_default();
             self.menu_target_session_id = Some(session.session_id.clone());
             self.preset_target_session_id = Some(session.session_id.clone());
+            self.preset_target_cwd = Some(session.cwd.clone());
+            self.menu_known_target_cwd = None;
             ctx.data_mut(|d| {
                 d.insert_temp(egui::Id::new(MENU_POS_KEY), [cursor.x, cursor.y]);
                 d.insert_temp(egui::Id::new(MENU_OPEN_KEY), true);
@@ -999,6 +1016,9 @@ impl eframe::App for CompanionApp {
             match action {
                 CompanionMenuAction::SelectProject(session_id) => {
                     if self.sessions.iter().any(|s| s.session_id == session_id) {
+                        self.preset_target_cwd = self.sessions.iter()
+                            .find(|entry| entry.session_id == session_id)
+                            .map(|entry| entry.cwd.clone());
                         self.preset_target_session_id = Some(session_id);
                         self.menu_known_target_cwd = None;
                     }
@@ -1009,6 +1029,10 @@ impl eframe::App for CompanionApp {
                     }
                 }
                 CompanionMenuAction::SelectPreset(action) => {
+                    if preset_target.status == "unavailable" {
+                        crate::log::debug("preset request ignored: selected project exited");
+                        return;
+                    }
                     self.preset_request_seq = self.preset_request_seq.wrapping_add(1);
                     let request_id = format!("{}-{}", std::process::id(), self.preset_request_seq);
                     let request = CompanionPresetRequest {
@@ -1499,6 +1523,12 @@ fn render_companion_menu(
                         );
                     });
 
+                    if target.status == "unavailable" {
+                        ui.colored_label(
+                            egui::Color32::LIGHT_RED,
+                            "Selected project closed. Choose an open project to edit presets.",
+                        );
+                    }
                     if target.status == "offline" {
                         ui.label(
                             egui::RichText::new("Remembered project · preset catalog may be stale")
