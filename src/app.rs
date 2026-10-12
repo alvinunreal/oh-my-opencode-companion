@@ -520,6 +520,18 @@ fn preset_target_session_index(
     }
 }
 
+fn session_activity_rank(session: &SessionInfo) -> u8 {
+    if session.status == "waiting-input" {
+        3
+    } else if session.active_agents.iter().any(|agent| agent != "intro") {
+        2
+    } else if session.status == "busy" {
+        1
+    } else {
+        0
+    }
+}
+
 fn project_session_indices(sessions: &[SessionInfo]) -> Vec<usize> {
     let mut indices: Vec<usize> = Vec::new();
     for (index, session) in sessions.iter().enumerate() {
@@ -527,7 +539,11 @@ fn project_session_indices(sessions: &[SessionInfo]) -> Vec<usize> {
             .iter_mut()
             .find(|existing| sessions[**existing].cwd == session.cwd)
         {
-            *existing = index;
+            // Prefer an active/waiting session over the last idle publisher.
+            // For equal priority keep the newest session for current state.
+            if session_activity_rank(session) >= session_activity_rank(&sessions[*existing]) {
+                *existing = index;
+            }
         } else {
             indices.push(index);
         }
@@ -1417,7 +1433,10 @@ fn render_companion_menu(
                                         continue;
                                     }
                                     matches += 1;
-                                    let live = sessions.iter().find(|s| s.cwd == known.cwd);
+                                    let live = project_session_indices(sessions)
+                                        .into_iter()
+                                        .map(|index| &sessions[index])
+                                        .find(|session| session.cwd == known.cwd);
                                     let label = if live.is_some() { "Open" } else { "Remembered" };
                                     if ui
                                         .selectable_label(
@@ -1448,9 +1467,7 @@ fn render_companion_menu(
                                     continue;
                                 }
                                 let project = &sessions[index];
-                                let active = project.status == "busy"
-                                    || project.status == "waiting-input"
-                                    || project.active_agents.iter().any(|agent| agent != "intro");
+                                let active = session_activity_rank(project) > 0;
                                 if view == 0 && !active {
                                     continue;
                                 }
@@ -1702,8 +1719,9 @@ mod tests {
         attention_type_for_status, choose_session, config_key, grid_dims, handle_drag_start,
         pending_preset_request_should_clear, place_window, popup_position_for_monitors,
         preset_request_completed, preset_target_session_index, project_session_indices,
-        restore_window_position, selected_session_index, should_apply_geometry, size_from_config,
-        visible_on_monitor, window_size, ConfigKey, PendingPresetRequest, PresetScope, SessionInfo,
+        restore_window_position, selected_session_index, session_activity_rank,
+        should_apply_geometry, size_from_config, visible_on_monitor, window_size, ConfigKey,
+        PendingPresetRequest, PresetScope, SessionInfo,
         WindowGeometryKey, GAP,
     };
     use crate::state::{CompanionAgentDetail, CompanionConfigState, CompanionPresetState};
@@ -1949,7 +1967,22 @@ mod tests {
         beta.cwd = "/projects/beta".into();
         let sessions = vec![alpha_old, alpha_new, beta];
 
-        assert_eq!(project_session_indices(&sessions), vec![1, 2]);
+        assert_eq!(project_session_indices(&sessions), vec![0, 2]);
+        assert!(session_activity_rank(&sessions[project_session_indices(&sessions)[0]]) > 0);
+    }
+
+    #[test]
+    fn picker_favors_waiting_input_over_busy_and_idle_for_same_project() {
+        let mut waiting = session("waiting", "waiting-input", &["input"]);
+        waiting.cwd = "/projects/alpha".into();
+        let mut busy = session("busy", "busy", &["fixer"]);
+        busy.cwd = "/projects/alpha".into();
+        let mut idle = session("idle", "idle", &["intro"]);
+        idle.cwd = "/projects/alpha".into();
+
+        let sessions = vec![waiting, busy, idle];
+        assert_eq!(project_session_indices(&sessions), vec![0]);
+        assert_eq!(session_activity_rank(&sessions[0]), 3);
     }
 
     #[test]
