@@ -28,9 +28,7 @@ const SURFACE_INSET: f32 = 1.0;
 const SIZE_KEY: &str = "companion_size";
 const MENU_OPEN_KEY: &str = "companion_menu_open";
 const MENU_POS_KEY: &str = "companion_menu_pos";
-const MENU_JUST_OPENED_KEY: &str = "companion_menu_just_opened";
 const MENU_PROJECT_QUERY_KEY: &str = "companion_menu_project_query";
-const MENU_SHOW_OPEN_KEY: &str = "companion_menu_show_open";
 const MENU_SHOW_KNOWN_KEY: &str = "companion_menu_show_known";
 const MENU_POPUP_FOCUSED_KEY: &str = "companion_menu_popup_focused";
 const PRESET_SCOPE_GLOBAL_KEY: &str = "companion_preset_scope_global";
@@ -415,24 +413,6 @@ fn choose_session(sessions: &[SessionInfo]) -> Option<usize> {
         .or_else(|| sessions.last().map(|_| sessions.len() - 1))
 }
 
-fn compact_preset_label(value: &str) -> String {
-    let chars: Vec<char> = value.chars().collect();
-    if chars.len() <= 8 {
-        return value.to_string();
-    }
-    format!("{}…", chars[..7].iter().collect::<String>())
-}
-
-fn compact_scoped_label(prefix: &str, value: &str) -> String {
-    let chars: Vec<char> = value.chars().collect();
-    let value = if chars.len() <= 4 {
-        value.to_string()
-    } else {
-        format!("{}…", chars[..3].iter().collect::<String>())
-    };
-    format!("{prefix}:{value}")
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PresetScope {
     Project,
@@ -447,12 +427,6 @@ impl PresetScope {
         }
     }
 
-    fn toggled(self) -> Self {
-        match self {
-            Self::Project => Self::Global,
-            Self::Global => Self::Project,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -490,99 +464,6 @@ fn project_current(state: &CompanionPresetState) -> Option<&str> {
         state.project.as_deref()
     } else {
         state.current.as_deref()
-    }
-}
-
-fn adjacent_preset(
-    state: &CompanionPresetState,
-    scope: PresetScope,
-    direction: isize,
-) -> Option<PresetMenuAction> {
-    match scope {
-        PresetScope::Project => {
-            let available = project_catalog(state);
-            let len = available.len() + 1; // slot 0 is "inherit global"
-            if len <= 1 && project_current(state).is_none() {
-                return None;
-            }
-            let current_index = project_current(state)
-                .and_then(|current| {
-                    available
-                        .iter()
-                        .position(|name| name == current)
-                        .map(|index| index + 1)
-                })
-                .unwrap_or(0);
-            let next = (current_index as isize + direction).rem_euclid(len as isize) as usize;
-            if next == 0 {
-                Some(PresetMenuAction {
-                    scope,
-                    preset: None,
-                    inherit: true,
-                })
-            } else {
-                Some(PresetMenuAction {
-                    scope,
-                    preset: available.get(next - 1).cloned(),
-                    inherit: false,
-                })
-            }
-        }
-        PresetScope::Global => {
-            let available = &state.global_available;
-            if available.is_empty() {
-                return None;
-            }
-            let Some(current) = state.global.as_deref() else {
-                return Some(PresetMenuAction {
-                    scope,
-                    preset: available.first().cloned(),
-                    inherit: false,
-                });
-            };
-            let index = available
-                .iter()
-                .position(|name| name == current)
-                .unwrap_or(0);
-            let next = (index as isize + direction).rem_euclid(available.len() as isize) as usize;
-            Some(PresetMenuAction {
-                scope,
-                preset: available.get(next).cloned(),
-                inherit: false,
-            })
-        }
-    }
-}
-
-fn scope_label(state: &CompanionPresetState, scope: PresetScope) -> String {
-    match scope {
-        PresetScope::Project => project_current(state)
-            .map(|current| compact_scoped_label("Prj", current))
-            .unwrap_or_else(|| "Prj:Inherit".to_string()),
-        PresetScope::Global => state
-            .global
-            .as_deref()
-            .map(|current| compact_scoped_label("Gbl", current))
-            .unwrap_or_else(|| "Gbl:None".to_string()),
-    }
-}
-
-fn scope_hover(state: &CompanionPresetState, scope: PresetScope) -> String {
-    match scope {
-        PresetScope::Project => match state.project.as_deref() {
-            Some(project) => format!(
-                "Project preset: {project}\nEffective: {}\nClick to edit Global instead. Project cycling includes Inherit.",
-                state.effective.as_deref().unwrap_or("none")
-            ),
-            None => format!(
-                "Project preset: Inherit Global\nEffective: {}\nClick to edit Global instead. Choosing a preset creates a project override.",
-                state.effective.as_deref().unwrap_or("none")
-            ),
-        },
-        PresetScope::Global => format!(
-            "Global preset: {}\nAffects projects that inherit the global setting. Projects with local overrides keep them.\nClick to edit this Project instead.",
-            state.global.as_deref().unwrap_or("none")
-        ),
     }
 }
 
@@ -652,23 +533,6 @@ fn project_session_indices(sessions: &[SessionInfo]) -> Vec<usize> {
         }
     }
     indices
-}
-
-fn adjacent_project_session_index(
-    sessions: &[SessionInfo],
-    current_session_id: &str,
-    direction: isize,
-) -> Option<usize> {
-    let projects = project_session_indices(sessions);
-    if projects.len() <= 1 {
-        return None;
-    }
-    let current = projects
-        .iter()
-        .position(|index| sessions[*index].session_id == current_session_id)
-        .unwrap_or(0);
-    let next = (current as isize + direction).rem_euclid(projects.len() as isize) as usize;
-    projects.get(next).copied()
 }
 
 fn project_display_name(cwd: &str) -> String {
@@ -1111,7 +975,6 @@ impl eframe::App for CompanionApp {
             ctx.data_mut(|d| {
                 d.insert_temp(egui::Id::new(MENU_POS_KEY), [cursor.x, cursor.y]);
                 d.insert_temp(egui::Id::new(MENU_OPEN_KEY), true);
-                d.insert_temp(egui::Id::new(MENU_JUST_OPENED_KEY), true);
                 d.insert_temp(egui::Id::new(MENU_POPUP_FOCUSED_KEY), false);
             });
         }
@@ -1789,13 +1652,13 @@ fn is_pid_alive(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        adjacent_preset, adjacent_project_session_index, agent_detail_tooltip, apply_config,
+        agent_detail_tooltip, apply_config,
         attention_key, attention_stroke, attention_type_for_status, choose_session, config_key,
         grid_dims, handle_drag_start, pending_preset_request_should_clear, place_window,
         popup_position_for_monitors, preset_request_completed, preset_target_session_index,
         project_session_indices, restore_window_position, selected_session_index,
         should_apply_geometry, size_from_config, visible_on_monitor, window_size, ConfigKey,
-        PendingPresetRequest, PresetMenuAction, PresetScope, SessionInfo, WindowGeometryKey, GAP,
+        PendingPresetRequest, PresetScope, SessionInfo, WindowGeometryKey, GAP,
     };
     use crate::state::{CompanionAgentDetail, CompanionConfigState, CompanionPresetState};
 
@@ -2004,7 +1867,7 @@ mod tests {
     }
 
     #[test]
-    fn project_selector_deduplicates_projects_and_cycles_independently_of_activity() {
+    fn project_picker_deduplicates_live_sessions_by_cwd() {
         let mut alpha_old = session("alpha-old", "busy", &["fixer"]);
         alpha_old.cwd = "/projects/alpha".into();
         let mut alpha_new = session("alpha-new", "idle", &["intro"]);
@@ -2014,14 +1877,6 @@ mod tests {
         let sessions = vec![alpha_old, alpha_new, beta];
 
         assert_eq!(project_session_indices(&sessions), vec![1, 2]);
-        assert_eq!(
-            adjacent_project_session_index(&sessions, "alpha-new", 1),
-            Some(2)
-        );
-        assert_eq!(
-            adjacent_project_session_index(&sessions, "beta", 1),
-            Some(1)
-        );
     }
 
     #[test]
@@ -2051,85 +1906,6 @@ mod tests {
             &[session("other", "idle", &["intro"])],
             "req-7"
         ));
-    }
-
-    #[test]
-    fn project_scope_cycles_through_inherit_and_project_catalog() {
-        let state = preset_state(
-            Some("balanced"),
-            Some("balanced"),
-            Some("cheap"),
-            &["cheap", "balanced", "deep"],
-            &["cheap", "deep"],
-        );
-
-        assert_eq!(
-            adjacent_preset(&state, PresetScope::Project, 1),
-            Some(PresetMenuAction {
-                scope: PresetScope::Project,
-                preset: Some("deep".into()),
-                inherit: false,
-            })
-        );
-        assert_eq!(
-            adjacent_preset(&state, PresetScope::Project, -1),
-            Some(PresetMenuAction {
-                scope: PresetScope::Project,
-                preset: Some("cheap".into()),
-                inherit: false,
-            })
-        );
-
-        let inherited = preset_state(
-            Some("cheap"),
-            None,
-            Some("cheap"),
-            &["cheap", "deep"],
-            &["cheap", "deep"],
-        );
-        assert_eq!(
-            adjacent_preset(&inherited, PresetScope::Project, -1),
-            Some(PresetMenuAction {
-                scope: PresetScope::Project,
-                preset: Some("deep".into()),
-                inherit: false,
-            })
-        );
-
-        let first_override = preset_state(
-            Some("cheap"),
-            Some("cheap"),
-            Some("deep"),
-            &["cheap", "deep"],
-            &["cheap", "deep"],
-        );
-        assert_eq!(
-            adjacent_preset(&first_override, PresetScope::Project, -1),
-            Some(PresetMenuAction {
-                scope: PresetScope::Project,
-                preset: None,
-                inherit: true,
-            })
-        );
-    }
-
-    #[test]
-    fn global_scope_uses_only_global_catalog() {
-        let state = preset_state(
-            Some("local"),
-            Some("local"),
-            Some("global-a"),
-            &["global-a", "local"],
-            &["global-a", "global-b"],
-        );
-        assert_eq!(
-            adjacent_preset(&state, PresetScope::Global, 1),
-            Some(PresetMenuAction {
-                scope: PresetScope::Global,
-                preset: Some("global-b".into()),
-                inherit: false,
-            })
-        );
     }
 
     #[test]
