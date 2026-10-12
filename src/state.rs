@@ -718,4 +718,42 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
+
+    #[test]
+    fn offline_preset_request_rejects_unregistered_folder_and_accepts_known_folder() {
+        let path = temp_state_path("known-offline");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"version":1,"sessions":[{"session_id":"relay","cwd":"/relay"}],"known_projects":[{"cwd":"/known","last_seen":1}]}"#,
+        )
+        .unwrap();
+
+        let unknown = CompanionPresetRequest {
+            request_id: "unknown".into(),
+            session_id: "relay".into(),
+            target_cwd: Some("/unknown".into()),
+            scope: "project".into(),
+            preset: Some("cheap".into()),
+            inherit: false,
+        };
+        let err = write_preset_request(&path, unknown).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(read_state(&path).preset_requests.is_empty());
+
+        let known = CompanionPresetRequest {
+            request_id: "known".into(),
+            session_id: "relay".into(),
+            target_cwd: Some("/known".into()),
+            scope: "project".into(),
+            preset: Some("cheap".into()),
+            inherit: false,
+        };
+        write_preset_request(&path, known).unwrap();
+        assert_eq!(
+            read_state(&path).preset_requests[0].target_cwd.as_deref(),
+            Some("/known")
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
 }
