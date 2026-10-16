@@ -29,7 +29,6 @@ impl Gifs {
         sheets.insert("fixer", include_bytes!("../animations/fixer.jpg"));
         sheets.insert("input", include_bytes!("../animations/question.jpg"));
         sheets.insert("intro", include_bytes!("../animations/intro.jpg"));
-        sheets.insert("librarian", include_bytes!("../animations/librarian.jpg"));
         sheets.insert("observer", include_bytes!("../animations/observer.jpg"));
         sheets.insert("oracle", include_bytes!("../animations/oracle.jpg"));
         sheets.insert(
@@ -181,7 +180,6 @@ mod tests {
         for agent in [
             "orchestrator",
             "explorer",
-            "librarian",
             "observer",
             "oracle",
             "designer",
