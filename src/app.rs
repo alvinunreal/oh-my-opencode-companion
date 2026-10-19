@@ -32,6 +32,7 @@ const MENU_PROJECT_QUERY_KEY: &str = "companion_menu_project_query";
 const MENU_SHOW_KNOWN_KEY: &str = "companion_menu_show_known";
 const MENU_POPUP_FOCUSED_KEY: &str = "companion_menu_popup_focused";
 const MENU_POPUP_PREPARED_KEY: &str = "companion_menu_popup_prepared";
+const MENU_POPUP_REVEALED_KEY: &str = "companion_menu_popup_revealed";
 const PRESET_SCOPE_GLOBAL_KEY: &str = "companion_preset_scope_global";
 const PROJECT_OPEN_PENDING_KEY: &str = "companion_project_open_pending";
 const PROJECT_OPEN_ERROR_KEY: &str = "companion_project_open_error";
@@ -1013,6 +1014,7 @@ impl eframe::App for CompanionApp {
                 d.insert_temp(egui::Id::new(MENU_POPUP_FOCUSED_KEY), false);
                 // Build the child viewport hidden before showing its first frame.
                 d.insert_temp(egui::Id::new(MENU_POPUP_PREPARED_KEY), false);
+                d.insert_temp(egui::Id::new(MENU_POPUP_REVEALED_KEY), false);
             });
         }
 
@@ -1319,7 +1321,7 @@ fn companion_popup_builder(
     position: egui::Pos2,
     prepared: bool,
 ) -> egui::ViewportBuilder {
-    egui::ViewportBuilder::default()
+    let builder = egui::ViewportBuilder::default()
         .with_title("Companion controls")
         .with_inner_size([POPUP_W, POPUP_H])
         .with_min_inner_size([POPUP_W, POPUP_H])
@@ -1327,8 +1329,17 @@ fn companion_popup_builder(
         .with_decorations(false)
         .with_resizable(false)
         .with_always_on_top()
-        .with_visible(prepared)
-        .with_active(prepared)
+        .with_active(false);
+
+    // egui 0.29 recreates a viewport if its 'active' builder field changes.
+    // Create it hidden, then reveal with an explicit command after rendering.
+    // Never set visible=true in the builder, which also has an older patch bug
+    // comparing visibility against the 'active' rather than 'visible' field.
+    if prepared {
+        builder
+    } else {
+        builder.with_visible(false)
+    }
 }
 
 fn render_companion_menu(
@@ -1715,6 +1726,20 @@ fn render_companion_menu(
                         }
                         });
                 });
+            let revealed = ctx.data(|data| {
+                data.get_temp::<bool>(egui::Id::new(MENU_POPUP_REVEALED_KEY))
+                    .unwrap_or(false)
+            });
+            if popup_prepared && !revealed {
+                // The child has been rendered at least once while hidden.
+                // Avoid switching ViewportBuilder.active: egui 0.29 would
+                // destroy/recreate the window and repeat the flash.
+                popup_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                popup_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                ctx.data_mut(|data| {
+                    data.insert_temp(egui::Id::new(MENU_POPUP_REVEALED_KEY), true);
+                });
+            }
         },
     );
     if !popup_prepared {
@@ -1957,8 +1982,8 @@ mod tests {
         );
 
         let ready = super::companion_popup_builder(location, true);
-        assert_eq!(ready.visible, Some(true));
-        assert_eq!(ready.active, Some(true));
+        assert_eq!(ready.visible, None);
+        assert_eq!(ready.active, Some(false));
         assert_eq!(ready.position, first.position);
         assert_eq!(ready.inner_size, first.inner_size);
     }
