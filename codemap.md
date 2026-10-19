@@ -35,3 +35,7 @@ The companion communicates with OpenCode host runtime via file-based state shari
 ## Shared-state locking
 
 `state.rs` recovers abandoned `companion-state.json.lock` directories after a bounded stale interval. Native window-position writes run on a background worker, while the UI keeps the latest position in memory until the shared state reflects it. This prevents the previous one-second UI stall when a state writer was blocked.
+
+## Popup regression coverage
+
+`src/app/popup_tests.rs` drives the production menu through real egui parent/child frames with a thread-isolated immediate renderer. It checks hidden rendering, one ordered reveal/focus pair on the next frame, close/reopen state reset, primary-press-only header dragging (including a new drag after a consumed release), the separate close hit area, and root-window command isolation in both native and embedded modes. These tests cover egui state and emitted commands; physical Windows/macOS/Linux smoke still verifies compositor-visible flashing, cross-monitor movement and native pointer release.

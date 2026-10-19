@@ -1008,14 +1008,7 @@ impl eframe::App for CompanionApp {
             self.preset_target_session_id = Some(session.session_id.clone());
             self.preset_target_cwd = Some(session.cwd.clone());
             self.menu_known_target_cwd = None;
-            ctx.data_mut(|d| {
-                d.insert_temp(egui::Id::new(MENU_POS_KEY), [cursor.x, cursor.y]);
-                d.insert_temp(egui::Id::new(MENU_OPEN_KEY), true);
-                d.insert_temp(egui::Id::new(MENU_POPUP_FOCUSED_KEY), false);
-                // Build the child viewport hidden before showing its first frame.
-                d.insert_temp(egui::Id::new(MENU_POPUP_PREPARED_KEY), false);
-                d.insert_temp(egui::Id::new(MENU_POPUP_REVEALED_KEY), false);
-            });
+            open_companion_menu(ctx, cursor);
         }
 
         egui::CentralPanel::default()
@@ -1317,6 +1310,17 @@ fn popup_position_for_monitors(
     [pointer[0].clamp(left, right), pointer[1].clamp(top, bottom)]
 }
 
+fn open_companion_menu(ctx: &egui::Context, cursor: egui::Pos2) {
+    ctx.data_mut(|data| {
+        data.insert_temp(egui::Id::new(MENU_POS_KEY), [cursor.x, cursor.y]);
+        data.insert_temp(egui::Id::new(MENU_OPEN_KEY), true);
+        data.insert_temp(egui::Id::new(MENU_POPUP_FOCUSED_KEY), false);
+        // Each opening starts with a hidden child, including after focus loss.
+        data.insert_temp(egui::Id::new(MENU_POPUP_PREPARED_KEY), false);
+        data.insert_temp(egui::Id::new(MENU_POPUP_REVEALED_KEY), false);
+    });
+}
+
 fn companion_popup_builder(position: egui::Pos2, prepared: bool) -> egui::ViewportBuilder {
     let builder = egui::ViewportBuilder::default()
         .with_title("Companion controls")
@@ -1415,6 +1419,8 @@ fn render_companion_menu(
                     ui.horizontal(|ui| {
                         // Keep most of the header as a drag handle, excluding
                         // the close control at the right edge.
+                        // Text selection adds click sensing and delays dragging;
+                        // native drag must start on the primary press (#1219).
                         let handle = ui
                             .add_sized(
                                 [(available - 40.0).max(100.0), 28.0],
@@ -1423,10 +1429,14 @@ fn render_companion_menu(
                                         .size(16.0)
                                         .strong(),
                                 )
+                                .selectable(false)
                                 .sense(egui::Sense::drag()),
                             )
                             .on_hover_text("Drag this header to move the popup");
-                        if handle.drag_started()
+                        // Native dragging may consume the release, leaving egui's
+                        // dragged-widget state stale. A fresh press must still work.
+                        if handle.contains_pointer()
+                            && popup_ctx.input(|input| input.pointer.primary_pressed())
                             && matches!(viewport_class, egui::ViewportClass::Immediate)
                         {
                             popup_ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
@@ -1755,10 +1765,14 @@ fn render_companion_menu(
                 data.get_temp::<bool>(egui::Id::new(MENU_POPUP_REVEALED_KEY))
                     .unwrap_or(false)
             });
-            if popup_prepared && !revealed {
+            if matches!(viewport_class, egui::ViewportClass::Immediate)
+                && popup_prepared
+                && !revealed
+            {
                 // The child has been rendered at least once while hidden.
                 // Avoid switching ViewportBuilder.active: egui 0.29 would
                 // destroy/recreate the window and repeat the flash.
+                // Embedded callbacks share ROOT and must never reveal/focus it.
                 popup_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 popup_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 ctx.data_mut(|data| {
@@ -1817,6 +1831,9 @@ fn is_pid_alive(pid: u32) -> bool {
 fn is_pid_alive(_pid: u32) -> bool {
     true
 }
+
+#[cfg(test)]
+mod popup_tests;
 
 #[cfg(test)]
 mod tests {
