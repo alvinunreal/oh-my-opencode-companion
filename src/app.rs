@@ -21,8 +21,8 @@ const GAP: f32 = 10.0;
 
 const SIZE_PRESETS: &[(&str, f32)] = &[("S", 80.0), ("M", 120.0), ("L", 160.0), ("XL", 200.0)];
 
-const POPUP_W: f32 = 382.0;
-const POPUP_H: f32 = 460.0;
+const POPUP_W: f32 = 352.0;
+const POPUP_H: f32 = 396.0;
 const SURFACE_INSET: f32 = 1.0;
 
 const SIZE_KEY: &str = "companion_size";
@@ -31,6 +31,7 @@ const MENU_POS_KEY: &str = "companion_menu_pos";
 const MENU_PROJECT_QUERY_KEY: &str = "companion_menu_project_query";
 const MENU_SHOW_KNOWN_KEY: &str = "companion_menu_show_known";
 const MENU_POPUP_FOCUSED_KEY: &str = "companion_menu_popup_focused";
+const MENU_POPUP_PREPARED_KEY: &str = "companion_menu_popup_prepared";
 const PRESET_SCOPE_GLOBAL_KEY: &str = "companion_preset_scope_global";
 const PROJECT_OPEN_PENDING_KEY: &str = "companion_project_open_pending";
 const PROJECT_OPEN_ERROR_KEY: &str = "companion_project_open_error";
@@ -1010,6 +1011,8 @@ impl eframe::App for CompanionApp {
                 d.insert_temp(egui::Id::new(MENU_POS_KEY), [cursor.x, cursor.y]);
                 d.insert_temp(egui::Id::new(MENU_OPEN_KEY), true);
                 d.insert_temp(egui::Id::new(MENU_POPUP_FOCUSED_KEY), false);
+                // Build the child viewport hidden before showing its first frame.
+                d.insert_temp(egui::Id::new(MENU_POPUP_PREPARED_KEY), false);
             });
         }
 
@@ -1346,6 +1349,10 @@ fn render_companion_menu(
     let popup = desired;
     let popup_position = egui::pos2(popup[0], popup[1]);
     let mut selected: Option<CompanionMenuAction> = None;
+    let popup_prepared = ctx.data(|data| {
+        data.get_temp::<bool>(egui::Id::new(MENU_POPUP_PREPARED_KEY))
+            .unwrap_or(false)
+    });
 
     // Native eframe viewport: no clipping to the GIF-sized root viewport,
     // no WindowGeometryKey updates, and readable independent menu controls.
@@ -1359,8 +1366,9 @@ fn render_companion_menu(
             .with_decorations(false)
             .with_resizable(false)
             .with_always_on_top()
-            .with_active(true),
-        |popup_ctx, _class| {
+            .with_visible(popup_prepared)
+            .with_active(popup_prepared),
+        |popup_ctx, viewport_class| {
             let was_focused = ctx.data(|data| {
                 data.get_temp::<bool>(egui::Id::new(MENU_POPUP_FOCUSED_KEY))
                     .unwrap_or(false)
@@ -1388,16 +1396,44 @@ fn render_companion_menu(
                         .inner_margin(egui::Margin::same(12.0)),
                 )
                 .show(popup_ctx, |ui| {
+                    let available = ui.available_width();
                     ui.horizontal(|ui| {
-                        ui.heading(egui::RichText::new("Companion").size(18.0));
-                        if ui.button("Close ✕").clicked() {
-                            ctx.data_mut(|d| {
-                                d.insert_temp(egui::Id::new(MENU_OPEN_KEY), false);
+                        // Keep most of the header as a drag handle, excluding
+                        // the close control at the right edge.
+                        let handle = ui
+                            .add_sized(
+                                [(available - 40.0).max(100.0), 28.0],
+                                egui::Label::new(
+                                    egui::RichText::new("Companion controls")
+                                        .size(16.0)
+                                        .strong(),
+                                )
+                                .sense(egui::Sense::drag()),
+                            )
+                            .on_hover_text("Drag this header to move the popup");
+                        if handle.drag_started()
+                            && matches!(viewport_class, egui::ViewportClass::Immediate)
+                        {
+                            popup_ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                        }
+                        if ui
+                            .add_sized([28.0, 28.0], egui::Button::new("×"))
+                            .on_hover_text("Close controls")
+                            .clicked()
+                        {
+                            ctx.data_mut(|data| {
+                                data.insert_temp(egui::Id::new(MENU_OPEN_KEY), false);
                             });
                         }
                     });
                     ui.separator();
 
+                    // Compact fixed-size viewport; scroll contents rather than
+                    // allocating a tall blank panel or clipping error states.
+                    egui::ScrollArea::vertical()
+                        .id_source("companion-controls-body")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
                     ui.label(egui::RichText::new("Preset target").strong());
                     let mut view = ctx
                         .data(|d| d.get_temp::<u8>(egui::Id::new(MENU_SHOW_KNOWN_KEY)))
@@ -1425,7 +1461,7 @@ fn render_companion_menu(
                     let mut matches = 0;
                     egui::ScrollArea::vertical()
                         .id_source("companion-project-list")
-                        .max_height(126.0)
+                        .max_height(104.0)
                         .show(ui, |ui| {
                             if view == 2 {
                                 for known in known_projects.iter().rev() {
@@ -1670,9 +1706,18 @@ fn render_companion_menu(
                     if !open_error.is_empty() {
                         ui.colored_label(egui::Color32::LIGHT_RED, open_error);
                     }
+                        });
                 });
         },
     );
+    if !popup_prepared {
+        // eframe already hides its ROOT window until its first render,
+        // but an immediate child viewport is otherwise visible on creation.
+        ctx.data_mut(|data| {
+            data.insert_temp(egui::Id::new(MENU_POPUP_PREPARED_KEY), true);
+        });
+        ctx.request_repaint();
+    }
     selected
 }
 
