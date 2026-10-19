@@ -1734,10 +1734,21 @@ fn render_companion_menu(
                                     }
                                 };
                                 ui.add_enabled_ui(!preset_pending, |ui| {
+                                    let combo_width = ui.available_width();
+                                    let menu_inner_width = (combo_width
+                                        - egui::Frame::popup(ui.style()).total_margin().sum().x)
+                                        .max(0.0);
                                     egui::ComboBox::from_id_source("companion-preset-combobox")
                                         .selected_text(current)
-                                        .width(290.0)
+                                        .width(combo_width)
+                                        .truncate()
                                         .show_ui(ui, |ui| {
+                                            // A previously opened catalog caches its width.
+                                            // Let it shrink with the current popup's cap.
+                                            ui.set_max_width(menu_inner_width.min(ui.available_width()));
+                                            // ComboBox defaults its catalog to Extend;
+                                            // wrap full names within the popup width.
+                                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                                             if scope == PresetScope::Project
                                                 && ui
                                                     .selectable_label(
@@ -1782,7 +1793,9 @@ fn render_companion_menu(
                                                         ));
                                                 }
                                             }
-                                        });
+                                        })
+                                        .response
+                                        .on_hover_text(current);
                                 });
                                 if let Some(message) = preset_state.message.as_deref() {
                                     ui.label(egui::RichText::new(message).size(11.0));

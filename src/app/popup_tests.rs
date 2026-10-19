@@ -2,10 +2,13 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::{
-    egui, open_companion_menu_with_monitors, render_companion_menu, SessionInfo, MENU_OPEN_KEY,
-    POPUP_H, POPUP_W,
+    egui, open_companion_menu_with_monitors, render_companion_menu, CompanionMenuAction,
+    PresetMenuAction, PresetScope, SessionInfo, MENU_OPEN_KEY, POPUP_H, POPUP_W,
 };
+use crate::state::CompanionPresetState;
 use egui::{Event, PointerButton, ViewportCommand, ViewportId};
+
+const LONG_PRESET_NAME: &str = "Deep research, implementation, and review across multiple projects";
 
 fn popup_id() -> ViewportId {
     ViewportId::from_hash_of("companion-controls")
@@ -22,7 +25,19 @@ fn target() -> SessionInfo {
         attention_seq: 0,
         pid: None,
         config: None,
-        preset: None,
+        preset: Some(CompanionPresetState {
+            current: Some(LONG_PRESET_NAME.into()),
+            available: vec!["Balanced".into(), LONG_PRESET_NAME.into(), "Fast".into()],
+            effective: Some(LONG_PRESET_NAME.into()),
+            project: Some(LONG_PRESET_NAME.into()),
+            global: Some("Balanced".into()),
+            project_available: vec!["Balanced".into(), LONG_PRESET_NAME.into(), "Fast".into()],
+            global_available: vec!["Balanced".into(), "Fast".into()],
+            message: None,
+            last_request_id: None,
+            result_ok: None,
+            last_scope: None,
+        }),
     }
 }
 
@@ -109,9 +124,26 @@ struct NativeFrame {
     builder: egui::ViewportBuilder,
     child_output: egui::FullOutput,
     root_output: egui::FullOutput,
+    selected: Option<CompanionMenuAction>,
 }
 
 impl NativeFrame {
+    fn button_containing(&self, text_bounds: egui::Rect) -> egui::Rect {
+        self.child_output
+            .shapes
+            .iter()
+            .filter_map(|clipped| {
+                if let egui::epaint::Shape::Rect(rect) = &clipped.shape {
+                    if rect.rect.contains_rect(text_bounds) {
+                        return Some(rect.rect);
+                    }
+                }
+                None
+            })
+            .min_by(|a, b| a.area().total_cmp(&b.area()))
+            .expect("painted button around text")
+    }
+
     fn commands(&self) -> Vec<ViewportCommand> {
         // egui 0.29 normally drains child commands when the outer root frame
         // ends. Inspect both outputs, just as the native integration does.
@@ -186,7 +218,12 @@ impl NativePopup {
             .viewports
             .insert(popup_id(), input.viewports[&popup_id()].clone());
         *self.next_input.borrow_mut() = Some(input);
-        let root_output = self.ctx.run(root_input, render);
+        let target = target();
+        let mut selected = None;
+        let root_output = self.ctx.run(root_input, |ctx| {
+            selected =
+                render_companion_menu(ctx, std::slice::from_ref(&target), &[], &target, false);
+        });
         assert_root_untouched(&root_output);
         let (builder, child_output) = self
             .rendered
@@ -197,6 +234,7 @@ impl NativePopup {
             builder,
             child_output,
             root_output,
+            selected,
         }
     }
 
@@ -475,7 +513,46 @@ fn native_popup_caps_its_size_on_a_small_high_dpi_work_area() {
     native_test(|| {
         let popup = NativePopup::new();
         let root = observed_input(ViewportId::ROOT, [710.0, 510.0], [300.0, 300.0], 2.0, 1.25);
-        popup.open_on_monitors(root.clone(), 1.25, &[[0.0, 0.0, 800.0, 600.0]]);
+        popup.open_on_monitors(root.clone(), 1.25, &[[0.0, 0.0, 1920.0, 1400.0]]);
+        let wide_input = observed_input(popup_id(), [760.0, 390.0], [880.0, 990.0], 2.0, 1.25);
+        popup.frame_with_root(root.clone(), wide_input.clone());
+        let wide = popup.frame_with_root(root.clone(), wide_input.clone());
+        let wide_combo_position = wide
+            .child_output
+            .shapes
+            .iter()
+            .find_map(|clipped| {
+                if let egui::epaint::Shape::Text(text) = &clipped.shape {
+                    if text.galley.text() == LONG_PRESET_NAME {
+                        return Some(text.galley.rect.translate(text.pos.to_vec2()).center());
+                    }
+                }
+                None
+            })
+            .expect("wide preset control");
+        // Open and close the catalog at normal width first. Its cached Area
+        // must be able to shrink when this same native popup is reopened.
+        for _ in 0..2 {
+            for pressed in [true, false] {
+                let mut click = wide_input.clone();
+                click.events = vec![
+                    Event::PointerMoved(wide_combo_position),
+                    Event::PointerButton {
+                        pos: wide_combo_position,
+                        button: PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ];
+                popup.frame_with_root(root.clone(), click);
+            }
+            popup.frame_with_root(root.clone(), wide_input.clone());
+        }
+        open_companion_menu_with_monitors(
+            &popup.ctx,
+            egui::pos2(20.0, 20.0),
+            Some(&[[0.0, 0.0, 800.0, 600.0]]),
+        );
         // At 2.5 effective pixels/point the normal 880x990 popup cannot fit.
         // Keep 20 physical pixels on every side, yielding 304x224 UI points.
         let first = popup.frame_with_root(
@@ -510,6 +587,31 @@ fn native_popup_caps_its_size_on_a_small_high_dpi_work_area() {
         ];
         popup.frame_with_root(root.clone(), scroll);
         let scrolled = popup.frame_with_root(root.clone(), ready_input.clone());
+        let (selected_text, selected_clip) = scrolled
+            .child_output
+            .shapes
+            .iter()
+            .find_map(|clipped| {
+                if let egui::epaint::Shape::Text(text) = &clipped.shape {
+                    if text.galley.text() == LONG_PRESET_NAME {
+                        return Some((
+                            text.galley.rect.translate(text.pos.to_vec2()),
+                            clipped.clip_rect,
+                        ));
+                    }
+                }
+                None
+            })
+            .expect("selected preset must be visible after scrolling");
+        let combo_button = scrolled.button_containing(selected_text);
+        assert!(
+            selected_clip.contains_rect(selected_text),
+            "long selected preset is clipped: {selected_text:?}, clip={selected_clip:?}"
+        );
+        assert!(
+            combo_button.left() >= 12.0 && combo_button.right() <= 292.0,
+            "preset combo exceeds the capped popup's content width: {combo_button:?}"
+        );
         for label in ["Open project folder", "Copy path", "Quit"] {
             let (bounds, clip_rect) = scrolled
                 .child_output
@@ -533,6 +635,86 @@ fn native_popup_caps_its_size_on_a_small_high_dpi_work_area() {
                 clip_rect.contains_rect(bounds),
                 "footer action {label:?} is clipped: {bounds:?}, clip={clip_rect:?}"
             );
+        }
+
+        // The selected text can truncate, but the opened catalog must remain
+        // readable and return the complete preset value when clicked.
+        let combo_position = combo_button.center();
+        for pressed in [true, false] {
+            let mut click = ready_input.clone();
+            click.events = vec![
+                Event::PointerMoved(combo_position),
+                Event::PointerButton {
+                    pos: combo_position,
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            let frame = popup.frame_with_root(root.clone(), click);
+            assert!(frame.selected.is_none());
+        }
+        let catalog = popup.frame_with_root(root.clone(), ready_input.clone());
+        let (choice_bounds, choice_clip) = catalog
+            .child_output
+            .shapes
+            .iter()
+            .rev()
+            .find_map(|clipped| {
+                if let egui::epaint::Shape::Text(text) = &clipped.shape {
+                    if text.galley.text() == LONG_PRESET_NAME && !text.galley.elided {
+                        return Some((
+                            text.galley.rect.translate(text.pos.to_vec2()),
+                            clipped.clip_rect,
+                        ));
+                    }
+                }
+                None
+            })
+            .expect("the opened catalog must show the full long preset name");
+        assert!(
+            ready_input
+                .screen_rect
+                .unwrap()
+                .contains_rect(choice_bounds),
+            "preset choice exceeds the capped canvas: {choice_bounds:?}"
+        );
+        assert!(
+            choice_clip.contains_rect(choice_bounds),
+            "preset choice is clipped: {choice_bounds:?}, clip={choice_clip:?}"
+        );
+        let choice_button = catalog.button_containing(choice_bounds);
+        assert!(
+            ready_input
+                .screen_rect
+                .unwrap()
+                .contains_rect(choice_button),
+            "cached preset row exceeds the capped canvas: {choice_button:?}"
+        );
+        for pressed in [true, false] {
+            let mut click = ready_input.clone();
+            click.events = vec![
+                Event::PointerMoved(choice_bounds.center()),
+                Event::PointerButton {
+                    pos: choice_bounds.center(),
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            let frame = popup.frame_with_root(root.clone(), click);
+            if pressed {
+                assert!(frame.selected.is_none());
+            } else {
+                assert_eq!(
+                    frame.selected,
+                    Some(CompanionMenuAction::SelectPreset(PresetMenuAction {
+                        scope: PresetScope::Project,
+                        preset: Some(LONG_PRESET_NAME.into()),
+                        inherit: false,
+                    }))
+                );
+            }
         }
 
         // The top-right Close remains reachable at the capped width.
