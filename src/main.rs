@@ -7,6 +7,8 @@ mod niri;
 mod screen;
 mod singleton;
 mod state;
+#[cfg(any(target_os = "windows", test))]
+mod window_drag;
 
 fn main() -> eframe::Result {
     let Some(owner_session_id) = std::env::var("OH_MY_OPENCODE_SLIM_COMPANION_SESSION_ID")
@@ -47,16 +49,23 @@ fn main() -> eframe::Result {
             .with_always_on_top()
             .with_active(false)
             .with_inner_size([120.0, 120.0]),
-        // Run as a macOS accessory app: no Dock icon, never steals focus
-        // from the terminal when the windows appear.
         event_loop_builder: Some(Box::new(|builder| {
             #[cfg(target_os = "macos")]
             {
+                // Run as an accessory app without a Dock icon or activation.
                 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
                 builder.with_activation_policy(ActivationPolicy::Accessory);
                 builder.with_activate_ignoring_other_apps(false);
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "windows")]
+            {
+                use winit::platform::windows::EventLoopBuilderExtWindows;
+                builder.with_msg_hook(|message| {
+                    // SAFETY: winit provides a live MSG on its event-loop thread.
+                    unsafe { window_drag::dispatch_caption_drag(message) }
+                });
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             let _ = builder;
         })),
         ..Default::default()

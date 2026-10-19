@@ -28,6 +28,7 @@ const SURFACE_INSET: f32 = 1.0;
 const SIZE_KEY: &str = "companion_size";
 const MENU_OPEN_KEY: &str = "companion_menu_open";
 const MENU_POS_KEY: &str = "companion_menu_pos";
+const MENU_POPUP_PLACEMENT_KEY: &str = "companion_menu_popup_placement";
 const MENU_PROJECT_QUERY_KEY: &str = "companion_menu_project_query";
 const MENU_SHOW_KNOWN_KEY: &str = "companion_menu_show_known";
 const MENU_POPUP_FOCUSED_KEY: &str = "companion_menu_popup_focused";
@@ -241,15 +242,15 @@ fn restore_window_position(pos: [f32; 2], screen: [f32; 2], win: [f32; 2]) -> [f
 fn visible_on_monitor(
     position: [f32; 2],
     size: [f32; 2],
-    native_pixels_per_point: f32,
+    pixels_per_point: f32,
     monitors: &[[f32; 4]],
 ) -> bool {
     if !position
         .iter()
         .chain(size.iter())
         .all(|value| value.is_finite())
-        || !native_pixels_per_point.is_finite()
-        || native_pixels_per_point <= 0.0
+        || !pixels_per_point.is_finite()
+        || pixels_per_point <= 0.0
         || size[0] <= 0.0
         || size[1] <= 0.0
     {
@@ -258,12 +259,12 @@ fn visible_on_monitor(
 
     // egui viewport geometry is in logical points; Win32 EnumDisplayMonitors
     // returns physical virtual-desktop coordinates, including negative origins.
-    let x = position[0] * native_pixels_per_point;
-    let y = position[1] * native_pixels_per_point;
-    let width = size[0] * native_pixels_per_point;
-    let height = size[1] * native_pixels_per_point;
-    let min_visible_w = width.min(48.0 * native_pixels_per_point);
-    let min_visible_h = height.min(48.0 * native_pixels_per_point);
+    let x = position[0] * pixels_per_point;
+    let y = position[1] * pixels_per_point;
+    let width = size[0] * pixels_per_point;
+    let height = size[1] * pixels_per_point;
+    let min_visible_w = width.min(48.0 * pixels_per_point);
+    let min_visible_h = height.min(48.0 * pixels_per_point);
 
     monitors.iter().any(|rect| {
         let overlap_w = (x + width).min(rect[2]) - x.max(rect[0]);
@@ -272,11 +273,24 @@ fn visible_on_monitor(
     })
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn saved_position_on_monitors(
+    ctx: &egui::Context,
+    position: [f32; 2],
+    size: [f32; 2],
+    monitors: &[[f32; 4]],
+) -> Option<[f32; 2]> {
+    // Match the effective scale egui-winit uses for outer_rect and OuterPosition,
+    // including UI zoom as well as the native monitor's DPI scale.
+    let pixels_per_point = ctx.pixels_per_point();
+    visible_on_monitor(position, size, pixels_per_point, monitors).then_some(position)
+}
+
 fn validated_saved_window_position(
+    ctx: &egui::Context,
     position: [f32; 2],
     screen: [f32; 2],
     size: [f32; 2],
-    native_pixels_per_point: f32,
 ) -> Option<[f32; 2]> {
     if !position.iter().all(|value| value.is_finite()) {
         return None;
@@ -286,12 +300,12 @@ fn validated_saved_window_position(
     {
         let monitors = crate::screen::monitor_rects_physical()?;
         let _ = screen;
-        visible_on_monitor(position, size, native_pixels_per_point, &monitors).then_some(position)
+        saved_position_on_monitors(ctx, position, size, &monitors)
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = native_pixels_per_point;
+        let _ = ctx;
         Some(restore_window_position(position, screen, size))
     }
 }
@@ -874,9 +888,6 @@ impl eframe::App for CompanionApp {
         }
         let project_key = self.project_key_for(&session.cwd);
         let saved_position = self.window_positions.get(&project_key).copied();
-        let pixels_per_point = ctx
-            .input(|input| input.viewport().native_pixels_per_point)
-            .unwrap_or(1.0);
         let time_seconds = ctx.input(|input| input.time);
         let agent_frames: Vec<(usize, AnimationFrame)> = if session.active_agents.is_empty() {
             self.gifs
@@ -936,12 +947,7 @@ impl eframe::App for CompanionApp {
         ) {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
             let validated_position = saved_position.and_then(|pos| {
-                validated_saved_window_position(
-                    [pos.x, pos.y],
-                    self.screen,
-                    [win_w, win_h],
-                    pixels_per_point,
-                )
+                validated_saved_window_position(ctx, [pos.x, pos.y], self.screen, [win_w, win_h])
             });
             if saved_position.is_some() && validated_position.is_none() {
                 crate::log::debug(format!(
@@ -1279,40 +1285,119 @@ fn start_project_directory_open(ctx: &egui::Context, session_id: &str, path: &st
     }
 }
 
-fn popup_position_for_monitors(
-    pointer: [f32; 2],
-    popup: [f32; 2],
-    points_to_pixels: f32,
-    monitors: &[[f32; 4]],
-) -> [f32; 2] {
-    if !pointer
-        .iter()
-        .chain(popup.iter())
-        .all(|coordinate| coordinate.is_finite())
-        || !points_to_pixels.is_finite()
-        || points_to_pixels <= 0.0
-    {
-        return pointer;
-    }
-
-    let p = [pointer[0] * points_to_pixels, pointer[1] * points_to_pixels];
-    let rect = monitors
-        .iter()
-        .find(|rect| p[0] >= rect[0] && p[0] < rect[2] && p[1] >= rect[1] && p[1] < rect[3]);
-    let Some(rect) = rect else {
-        return pointer;
-    };
-    let gap = 8.0;
-    let left = rect[0] / points_to_pixels + gap;
-    let top = rect[1] / points_to_pixels + gap;
-    let right = (rect[2] / points_to_pixels - popup[0] - gap).max(left);
-    let bottom = (rect[3] / points_to_pixels - popup[1] - gap).max(top);
-    [pointer[0].clamp(left, right), pointer[1].clamp(top, bottom)]
+fn open_companion_menu(ctx: &egui::Context, cursor: egui::Pos2) {
+    #[cfg(target_os = "windows")]
+    let monitors = Some(crate::screen::monitor_work_areas_physical().unwrap_or_default());
+    #[cfg(not(target_os = "windows"))]
+    let monitors: Option<Vec<[f32; 4]>> = None;
+    open_companion_menu_with_monitors(ctx, cursor, monitors.as_deref());
 }
 
-fn open_companion_menu(ctx: &egui::Context, cursor: egui::Pos2) {
+#[derive(Clone, Copy, Debug)]
+struct PopupPlacement {
+    anchor_pixels: egui::Pos2,
+    monitor_pixels: Option<[f32; 4]>,
+}
+
+impl PopupPlacement {
+    fn new(anchor_pixels: egui::Pos2, monitors: &[[f32; 4]]) -> Self {
+        // Work areas exclude taskbars. A click in that excluded strip still
+        // belongs near this monitor, so choose the nearest work area.
+        let monitor_pixels = monitors
+            .iter()
+            .filter(|rect| {
+                rect.iter().all(|coordinate| coordinate.is_finite())
+                    && rect[0] < rect[2]
+                    && rect[1] < rect[3]
+            })
+            .min_by(|a, b| {
+                let distance = |rect: &[f32; 4]| {
+                    let closest = egui::pos2(
+                        anchor_pixels.x.clamp(rect[0], rect[2]),
+                        anchor_pixels.y.clamp(rect[1], rect[3]),
+                    );
+                    anchor_pixels.distance_sq(closest)
+                };
+                distance(a).total_cmp(&distance(b))
+            })
+            .copied();
+        Self {
+            anchor_pixels,
+            monitor_pixels,
+        }
+    }
+
+    fn geometry(&self, pixels_per_point: f32) -> (egui::Pos2, egui::Vec2) {
+        let mut size = egui::vec2(POPUP_W, POPUP_H);
+        let mut position = self.anchor_pixels / pixels_per_point;
+        if let Some(rect) = self.monitor_pixels {
+            let gap = 8.0;
+            size.x = size
+                .x
+                .min(((rect[2] - rect[0]) / pixels_per_point - 2.0 * gap).max(1.0));
+            size.y = size
+                .y
+                .min(((rect[3] - rect[1]) / pixels_per_point - 2.0 * gap).max(1.0));
+            let left = rect[0] / pixels_per_point + gap;
+            let top = rect[1] / pixels_per_point + gap;
+            let right = (rect[2] / pixels_per_point - size.x - gap).max(left);
+            let bottom = (rect[3] / pixels_per_point - size.y - gap).max(top);
+            position.x = position.x.clamp(left, right);
+            position.y = position.y.clamp(top, bottom);
+        }
+        (position, size)
+    }
+
+    fn prepare(&self, ctx: &egui::Context) -> bool {
+        let pixels_per_point = ctx.pixels_per_point();
+        let (position, size) = self.geometry(pixels_per_point);
+        let (outer_rect, inner_rect) =
+            ctx.input(|input| (input.viewport().outer_rect, input.viewport().inner_rect));
+        let (Some(outer_rect), Some(inner_rect)) = (outer_rect, inner_rect) else {
+            return false;
+        };
+
+        // Native rectangles are rounded to whole physical pixels. Use the
+        // child's effective scale (including egui zoom), never the root's.
+        let matches = |delta: egui::Vec2| (delta * pixels_per_point).abs().max_elem() <= 1.0;
+        let position_ready = matches(outer_rect.min - position);
+        let size_ready = matches(inner_rect.size() - size);
+        if !size_ready {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        }
+        if !position_ready {
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
+        }
+        // A command issued in this frame is applied after painting. Wait for
+        // the native geometry and the canvas to report the final size before
+        // revealing the frame painted at that geometry.
+        position_ready && size_ready && matches(ctx.screen_rect().size() - size)
+    }
+}
+
+fn open_companion_menu_with_monitors(
+    ctx: &egui::Context,
+    cursor: egui::Pos2,
+    monitors: Option<&[[f32; 4]]>,
+) {
+    let origin = ctx
+        .input(|input| input.viewport().inner_rect.or(input.viewport().outer_rect))
+        .map(|rect| rect.min)
+        .unwrap_or(egui::Pos2::ZERO);
+    let position = origin + cursor.to_vec2();
+    let placement =
+        monitors.map(|monitors| PopupPlacement::new(position * ctx.pixels_per_point(), monitors));
+    if let Some(placement) = placement {
+        crate::log::debug(format!("popup opening placement={placement:?}"));
+    }
     ctx.data_mut(|data| {
-        data.insert_temp(egui::Id::new(MENU_POS_KEY), [cursor.x, cursor.y]);
+        // Freeze the opening anchor; later root movement must not move the
+        // menu, including after its header has been dragged independently.
+        data.insert_temp(egui::Id::new(MENU_POS_KEY), [position.x, position.y]);
+        data.remove::<PopupPlacement>(egui::Id::new(MENU_POPUP_PLACEMENT_KEY));
+        if let Some(placement) = placement {
+            data.insert_temp(egui::Id::new(MENU_POPUP_PLACEMENT_KEY), placement);
+        }
         data.insert_temp(egui::Id::new(MENU_OPEN_KEY), true);
         data.insert_temp(egui::Id::new(MENU_POPUP_FOCUSED_KEY), false);
         // Each opening starts with a hidden child, including after focus loss.
@@ -1321,16 +1406,23 @@ fn open_companion_menu(ctx: &egui::Context, cursor: egui::Pos2) {
     });
 }
 
-fn companion_popup_builder(position: egui::Pos2, prepared: bool) -> egui::ViewportBuilder {
-    let builder = egui::ViewportBuilder::default()
+fn companion_popup_builder(position: Option<egui::Pos2>, prepared: bool) -> egui::ViewportBuilder {
+    let mut builder = egui::ViewportBuilder::default()
         .with_title("Companion controls")
         .with_inner_size([POPUP_W, POPUP_H])
-        .with_min_inner_size([POPUP_W, POPUP_H])
-        .with_position(position)
         .with_decorations(false)
         .with_resizable(false)
         .with_always_on_top()
         .with_active(false);
+    if let Some(position) = position {
+        builder = builder
+            .with_position(position)
+            .with_min_inner_size([POPUP_W, POPUP_H]);
+    }
+    // On Windows egui-winit 0.29 interprets builder positions first with the
+    // primary monitor's scale, then with the new child's scale. Position the
+    // hidden child explicitly once its own scale is observed instead. Omit a
+    // minimum size there so the popup can fit a small/high-DPI work area.
 
     // egui 0.29 recreates a viewport if its 'active' builder field changes.
     // Create it hidden, then reveal with an explicit command after rendering.
@@ -1362,21 +1454,13 @@ fn render_companion_menu(
         d.get_temp(egui::Id::new(MENU_POS_KEY))
             .unwrap_or([20.0, 20.0])
     });
-    let origin = ctx
-        .input(|input| input.viewport().outer_rect)
-        .map(|rect| rect.min)
-        .unwrap_or(egui::Pos2::ZERO);
-    let desired = [origin.x + menu_pos[0], origin.y + menu_pos[1]];
-    #[cfg(target_os = "windows")]
-    let popup = {
-        let scale = ctx.input(|input| input.viewport().native_pixels_per_point.unwrap_or(1.0));
-        let monitors = crate::screen::monitor_rects_physical().unwrap_or_default();
-        popup_position_for_monitors(desired, [POPUP_W, POPUP_H], scale, &monitors)
-    };
-    #[cfg(not(target_os = "windows"))]
-    let popup = desired;
-    let popup_position = egui::pos2(popup[0], popup[1]);
+    let placement =
+        ctx.data(|data| data.get_temp::<PopupPlacement>(egui::Id::new(MENU_POPUP_PLACEMENT_KEY)));
+    let popup_position = placement
+        .is_none()
+        .then(|| egui::pos2(menu_pos[0], menu_pos[1]));
     let mut selected: Option<CompanionMenuAction> = None;
+    let mut geometry_pending = false;
     let popup_prepared = ctx.data(|data| {
         data.get_temp::<bool>(egui::Id::new(MENU_POPUP_PREPARED_KEY))
             .unwrap_or(false)
@@ -1388,12 +1472,19 @@ fn render_companion_menu(
         egui::ViewportId::from_hash_of("companion-controls"),
         companion_popup_builder(popup_position, popup_prepared),
         |popup_ctx, viewport_class| {
+            let revealed = ctx.data(|data| {
+                data.get_temp::<bool>(egui::Id::new(MENU_POPUP_REVEALED_KEY))
+                    .unwrap_or(false)
+            });
+            // Hiding a reused HWND can cause focus loss during preparation.
+            // Only focus observed after reveal can arm native dismissal.
+            let track_focus = revealed || matches!(viewport_class, egui::ViewportClass::Embedded);
             let was_focused = ctx.data(|data| {
                 data.get_temp::<bool>(egui::Id::new(MENU_POPUP_FOCUSED_KEY))
                     .unwrap_or(false)
             });
             let focused = popup_ctx.input(|input| input.viewport().focused);
-            if focused == Some(true) {
+            if track_focus && focused == Some(true) {
                 ctx.data_mut(|data| {
                     data.insert_temp(egui::Id::new(MENU_POPUP_FOCUSED_KEY), true);
                 });
@@ -1401,7 +1492,7 @@ fn render_companion_menu(
             let should_close = popup_ctx.input(|input| {
                 input.key_pressed(egui::Key::Escape)
                     || input.viewport().close_requested()
-                    || (was_focused && focused == Some(false))
+                    || (track_focus && was_focused && focused == Some(false))
             });
             if should_close {
                 ctx.data_mut(|d| d.insert_temp(egui::Id::new(MENU_OPEN_KEY), false));
@@ -1761,18 +1852,31 @@ fn render_companion_menu(
                             }
                         });
                 });
-            let revealed = ctx.data(|data| {
-                data.get_temp::<bool>(egui::Id::new(MENU_POPUP_REVEALED_KEY))
-                    .unwrap_or(false)
-            });
-            if matches!(viewport_class, egui::ViewportClass::Immediate)
-                && popup_prepared
-                && !revealed
-            {
+            if matches!(viewport_class, egui::ViewportClass::Immediate) && !revealed {
+                if !popup_prepared && placement.is_some() {
+                    // Reopening can reuse a still-visible child. The egui 0.29
+                    // builder visibility bug cannot hide it, so hide explicitly
+                    // before any corrective move or resize is applied.
+                    popup_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
+                let geometry_ready = placement.map(|placement| placement.prepare(popup_ctx)).unwrap_or(true);
+                geometry_pending = !geometry_ready;
+                if !popup_prepared || !geometry_ready {
+                    return;
+                }
                 // The child has been rendered at least once while hidden.
                 // Avoid switching ViewportBuilder.active: egui 0.29 would
                 // destroy/recreate the window and repeat the flash.
                 // Embedded callbacks share ROOT and must never reveal/focus it.
+                if placement.is_some() {
+                    let (outer_rect, inner_rect) = popup_ctx.input(|input| {
+                        (input.viewport().outer_rect, input.viewport().inner_rect)
+                    });
+                    crate::log::debug(format!(
+                        "popup revealing outer_rect_points={outer_rect:?} inner_rect_points={inner_rect:?} pixels_per_point={}",
+                        popup_ctx.pixels_per_point()
+                    ));
+                }
                 popup_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 popup_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 ctx.data_mut(|data| {
@@ -1787,6 +1891,8 @@ fn render_companion_menu(
         ctx.data_mut(|data| {
             data.insert_temp(egui::Id::new(MENU_POPUP_PREPARED_KEY), true);
         });
+    }
+    if !popup_prepared || geometry_pending {
         ctx.request_repaint();
     }
     selected
@@ -1840,11 +1946,11 @@ mod tests {
     use super::{
         agent_detail_tooltip, apply_config, attention_key, attention_stroke,
         attention_type_for_status, choose_session, config_key, grid_dims, handle_drag_start,
-        pending_preset_request_should_clear, place_window, popup_position_for_monitors,
-        preset_request_completed, preset_target_session_index, project_session_indices,
-        restore_window_position, selected_session_index, session_activity_rank,
-        should_apply_geometry, size_from_config, visible_on_monitor, window_size, ConfigKey,
-        PendingPresetRequest, PresetScope, SessionInfo, WindowGeometryKey, GAP,
+        pending_preset_request_should_clear, place_window, preset_request_completed,
+        preset_target_session_index, project_session_indices, restore_window_position,
+        selected_session_index, session_activity_rank, should_apply_geometry, size_from_config,
+        visible_on_monitor, window_size, ConfigKey, PendingPresetRequest, PresetScope, SessionInfo,
+        WindowGeometryKey, GAP,
     };
     use crate::state::{CompanionAgentDetail, CompanionConfigState, CompanionPresetState};
 
@@ -2013,7 +2119,7 @@ mod tests {
     #[test]
     fn popup_is_created_hidden_and_inactive_until_prepared() {
         let location = egui::pos2(125.0, 80.0);
-        let first = super::companion_popup_builder(location, false);
+        let first = super::companion_popup_builder(Some(location), false);
         assert_eq!(first.visible, Some(false));
         assert_eq!(first.active, Some(false));
         assert_eq!(first.position, Some(location));
@@ -2023,33 +2129,11 @@ mod tests {
             Some(egui::vec2(super::POPUP_W, super::POPUP_H))
         );
 
-        let ready = super::companion_popup_builder(location, true);
+        let ready = super::companion_popup_builder(Some(location), true);
         assert_eq!(ready.visible, None);
         assert_eq!(ready.active, Some(false));
         assert_eq!(ready.position, first.position);
         assert_eq!(ready.inner_size, first.inner_size);
-    }
-
-    #[test]
-    fn native_popup_clamps_near_screen_edges_and_negative_monitor_origins() {
-        let screens = [[0.0, 0.0, 1920.0, 1080.0], [-1600.0, 0.0, 0.0, 900.0]];
-        let popup = [super::POPUP_W, super::POPUP_H];
-        assert_eq!(
-            popup_position_for_monitors([1900.0, 1000.0], popup, 1.0, &screens),
-            [1560.0, 676.0]
-        );
-        assert_eq!(
-            popup_position_for_monitors([-1580.0, 100.0], popup, 1.0, &screens),
-            [-1580.0, 100.0]
-        );
-        assert_eq!(
-            popup_position_for_monitors([-50.0, 890.0], popup, 1.0, &screens),
-            [-360.0, 496.0]
-        );
-        assert_eq!(
-            popup_position_for_monitors([1850.0, 900.0], popup, 2.0, &screens),
-            [1850.0, 900.0]
-        );
     }
 
     #[test]
@@ -2101,6 +2185,28 @@ mod tests {
         assert!(!visible_on_monitor([f32::NAN, 100.0], size, 1.0, &monitors));
         assert!(!visible_on_monitor([100.0, 100.0], size, 0.0, &monitors));
         assert!(!visible_on_monitor([100.0, 100.0], size, 1.0, &[]));
+    }
+
+    #[test]
+    fn saved_position_on_offset_monitor_uses_ui_zoom() {
+        let ctx = egui::Context::default();
+        ctx.set_zoom_factor(2.0);
+        let mut input = egui::RawInput::default();
+        input
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .native_pixels_per_point = Some(1.0);
+        let monitors = [[0.0, 0.0, 1920.0, 1080.0], [-1920.0, 1080.0, 0.0, 2160.0]];
+
+        let _ = ctx.run(input, |ctx| {
+            // At 2x UI zoom, these points map to physical (-600, 1600),
+            // fully on the left display. Native scale alone puts them in the gap.
+            assert_eq!(
+                super::saved_position_on_monitors(ctx, [-300.0, 800.0], [120.0, 120.0], &monitors),
+                Some([-300.0, 800.0])
+            );
+        });
     }
 
     #[test]

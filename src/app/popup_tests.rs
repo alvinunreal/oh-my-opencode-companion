@@ -2,7 +2,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::{
-    egui, open_companion_menu, render_companion_menu, SessionInfo, MENU_OPEN_KEY, POPUP_H, POPUP_W,
+    egui, open_companion_menu_with_monitors, render_companion_menu, SessionInfo, MENU_OPEN_KEY,
+    POPUP_H, POPUP_W,
 };
 use egui::{Event, PointerButton, ViewportCommand, ViewportId};
 
@@ -47,6 +48,27 @@ fn input(viewport_id: ViewportId, focused: bool, events: Vec<Event>) -> egui::Ra
             },
         );
     }
+    input
+}
+
+fn observed_input(
+    viewport_id: ViewportId,
+    position_pixels: [f32; 2],
+    size_pixels: [f32; 2],
+    native_scale: f32,
+    zoom: f32,
+) -> egui::RawInput {
+    let mut input = input(viewport_id, viewport_id == ViewportId::ROOT, vec![]);
+    let pixels_per_point = native_scale * zoom;
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(position_pixels[0], position_pixels[1]) / pixels_per_point,
+        egui::vec2(size_pixels[0], size_pixels[1]) / pixels_per_point,
+    );
+    let viewport = input.viewports.get_mut(&viewport_id).unwrap();
+    viewport.native_pixels_per_point = Some(native_scale);
+    viewport.inner_rect = Some(rect);
+    viewport.outer_rect = Some(rect);
+    input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, rect.size()));
     input
 }
 
@@ -101,10 +123,14 @@ impl NativeFrame {
     }
 
     fn assert_no_reveal(&self) {
-        assert!(!self.commands().iter().any(|command| matches!(
-            command,
-            ViewportCommand::Visible(_) | ViewportCommand::Focus
-        )));
+        let commands = self.commands();
+        assert!(
+            !commands.iter().any(|command| matches!(
+                command,
+                ViewportCommand::Visible(true) | ViewportCommand::Focus
+            )),
+            "revealed before geometry was ready: {commands:?}"
+        );
     }
 }
 
@@ -144,8 +170,23 @@ impl NativePopup {
     }
 
     fn frame(&self, input: egui::RawInput) -> NativeFrame {
+        self.frame_with_root(input_for_root(), input)
+    }
+
+    fn frame_with_root(
+        &self,
+        mut root_input: egui::RawInput,
+        mut input: egui::RawInput,
+    ) -> NativeFrame {
+        input.viewports.insert(
+            ViewportId::ROOT,
+            root_input.viewports[&ViewportId::ROOT].clone(),
+        );
+        root_input
+            .viewports
+            .insert(popup_id(), input.viewports[&popup_id()].clone());
         *self.next_input.borrow_mut() = Some(input);
-        let root_output = self.ctx.run(input_for_root(), render);
+        let root_output = self.ctx.run(root_input, render);
         assert_root_untouched(&root_output);
         let (builder, child_output) = self
             .rendered
@@ -160,9 +201,20 @@ impl NativePopup {
     }
 
     fn ready(&self) {
-        open_companion_menu(&self.ctx, egui::pos2(20.0, 20.0));
+        open_companion_menu_with_monitors(&self.ctx, egui::pos2(20.0, 20.0), None);
         self.frame(input(popup_id(), false, vec![]));
         self.frame(input(popup_id(), true, vec![]));
+    }
+
+    fn open_on_monitors(&self, root: egui::RawInput, zoom: f32, monitors: &[[f32; 4]]) {
+        self.ctx.set_zoom_factor(zoom);
+        // Apply egui's pending zoom before submitting coordinates expressed
+        // at that zoom, as egui-winit does on the next input frame.
+        let _ = self.ctx.run(root.clone(), |_| {});
+        let output = self.ctx.run(root, |ctx| {
+            open_companion_menu_with_monitors(ctx, egui::pos2(20.0, 20.0), Some(monitors));
+        });
+        assert_root_untouched(&output);
     }
 }
 
@@ -179,11 +231,365 @@ fn native_test(test: impl FnOnce() + Send + 'static) {
 }
 
 #[test]
+fn native_popup_waits_for_window_geometry_before_reveal() {
+    native_test(|| {
+        let popup = NativePopup::new();
+        let opened = popup.ctx.run(input_for_root(), |ctx| {
+            open_companion_menu_with_monitors(
+                ctx,
+                egui::pos2(20.0, 20.0),
+                Some(&[[0.0, 0.0, 1920.0, 1040.0]]),
+            );
+        });
+        assert_root_untouched(&opened);
+
+        // Native creation and movement may report their previous rectangle
+        // for another frame. Painting that rectangle must not reveal it.
+        let mut unsettled = input(popup_id(), false, vec![]);
+        let rect = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(1280.0, 960.0));
+        unsettled.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, rect.size()));
+        let viewport = unsettled.viewports.get_mut(&popup_id()).unwrap();
+        viewport.inner_rect = Some(rect);
+        viewport.outer_rect = Some(rect);
+        popup.frame(unsettled.clone()).assert_no_reveal();
+        let correcting = popup.frame(unsettled);
+        correcting.assert_no_reveal();
+        assert_eq!(
+            correcting.commands(),
+            vec![
+                ViewportCommand::InnerSize(egui::vec2(352.0, 396.0)),
+                ViewportCommand::OuterPosition(egui::pos2(320.0, 220.0)),
+            ]
+        );
+        let ready = popup.frame(observed_input(
+            popup_id(),
+            [320.0, 220.0],
+            [352.0, 396.0],
+            1.0,
+            1.0,
+        ));
+        assert!(!ready.child_output.shapes.is_empty());
+        assert_eq!(
+            ready.commands(),
+            vec![ViewportCommand::Visible(true), ViewportCommand::Focus]
+        );
+    });
+}
+
+const THREE_WORK_AREAS: [[f32; 4]; 3] = [
+    [-1920.0, -160.0, 0.0, 1040.0],
+    [0.0, 0.0, 1920.0, 1040.0],
+    [1920.0, -120.0, 4480.0, 1320.0],
+];
+
+#[test]
+fn native_popup_reopening_hides_the_existing_child_before_moving_it() {
+    native_test(|| {
+        let popup = NativePopup::new();
+        popup.ready();
+        let root = observed_input(
+            ViewportId::ROOT,
+            [-1850.0, 110.0],
+            [150.0, 150.0],
+            1.25,
+            1.0,
+        );
+        popup.frame_with_root(root.clone(), input(popup_id(), true, vec![]));
+        // Reopen without an intervening closed frame: egui reuses the HWND,
+        // whose last builder.active=false makes its visible=false patch a no-op.
+        open_companion_menu_with_monitors(
+            &popup.ctx,
+            egui::pos2(20.0, 20.0),
+            Some(&THREE_WORK_AREAS),
+        );
+        // The old HWND can still report focus until the explicit hide runs.
+        let reopening = popup.frame_with_root(root.clone(), input(popup_id(), true, vec![]));
+        assert!(
+            is_open(&popup.ctx),
+            "reopening must reset the old focus state"
+        );
+        assert_eq!(reopening.builder.visible, Some(false));
+        assert_eq!(
+            reopening.commands(),
+            vec![
+                ViewportCommand::Visible(false),
+                ViewportCommand::OuterPosition(egui::pos2(-1825.0, 135.0)),
+            ]
+        );
+        let ready = popup.frame_with_root(
+            root.clone(),
+            observed_input(popup_id(), [-1825.0, 135.0], [440.0, 495.0], 1.25, 1.0),
+        );
+        assert!(
+            is_open(&popup.ctx),
+            "the hide's focus loss must not dismiss the reopening menu"
+        );
+        assert_eq!(
+            ready.commands(),
+            vec![ViewportCommand::Visible(true), ViewportCommand::Focus]
+        );
+
+        // Once shown and focused, an ordinary focus loss must still dismiss.
+        let mut focused = observed_input(popup_id(), [-1825.0, 135.0], [440.0, 495.0], 1.25, 1.0);
+        focused.focused = true;
+        focused.viewports.get_mut(&popup_id()).unwrap().focused = Some(true);
+        popup.frame_with_root(root.clone(), focused);
+        popup.frame_with_root(
+            root,
+            observed_input(popup_id(), [-1825.0, 135.0], [440.0, 495.0], 1.25, 1.0),
+        );
+        assert!(
+            !is_open(&popup.ctx),
+            "a shown popup must dismiss after losing focus"
+        );
+    });
+}
+
+#[test]
+fn native_popup_uses_child_scale_and_waits_for_move_resize_and_canvas() {
+    native_test(|| {
+        let popup = NativePopup::new();
+        let root = observed_input(ViewportId::ROOT, [3975.0, 775.0], [300.0, 300.0], 2.0, 1.25);
+        popup.open_on_monitors(root.clone(), 1.25, &THREE_WORK_AREAS);
+
+        // Root scale 2x plus 125% zoom freezes the click at (4025,825)
+        // desktop pixels. Creation may still report a size calculated for a
+        // 1.5x primary monitor while the child observes a 1x native scale.
+        let initial = observed_input(popup_id(), [-1500.0, 200.0], [660.0, 743.0], 1.0, 1.25);
+        for frame_index in 0..2 {
+            let frame = popup.frame_with_root(root.clone(), initial.clone());
+            assert_eq!(
+                frame.builder.position, None,
+                "primary-monitor scaling must not reinterpret the root anchor"
+            );
+            assert_eq!(frame.builder.min_inner_size, None);
+            assert_eq!(frame.builder.active, Some(false));
+            frame.assert_no_reveal();
+            let mut expected = vec![
+                ViewportCommand::InnerSize(egui::vec2(352.0, 396.0)),
+                ViewportCommand::OuterPosition(egui::pos2(3220.0, 652.0)),
+            ];
+            if frame_index == 0 {
+                expected.insert(0, ViewportCommand::Visible(false));
+            }
+            assert_eq!(frame.commands(), expected);
+        }
+
+        // The move reaches the right monitor and changes native scale to
+        // 2x. Its 880x990 popup now needs a different edge clamp: (3580,310).
+        // Moving the root meanwhile must not change the frozen click.
+        let moved_root =
+            observed_input(ViewportId::ROOT, [100.0, 100.0], [225.0, 225.0], 1.5, 1.25);
+        let moved = popup.frame_with_root(
+            moved_root.clone(),
+            observed_input(popup_id(), [4025.0, 815.0], [660.0, 743.0], 2.0, 1.25),
+        );
+        moved.assert_no_reveal();
+        assert_eq!(
+            moved.commands(),
+            vec![
+                ViewportCommand::InnerSize(egui::vec2(352.0, 396.0)),
+                ViewportCommand::OuterPosition(egui::pos2(1432.0, 124.0)),
+            ]
+        );
+
+        let positioned = popup.frame_with_root(
+            moved_root.clone(),
+            observed_input(popup_id(), [3580.0, 310.0], [660.0, 743.0], 2.0, 1.25),
+        );
+        positioned.assert_no_reveal();
+        assert_eq!(
+            positioned.commands(),
+            vec![ViewportCommand::InnerSize(egui::vec2(352.0, 396.0))]
+        );
+
+        let settled = observed_input(popup_id(), [3580.0, 310.0], [880.0, 990.0], 2.0, 1.25);
+        let mut stale_canvas = settled.clone();
+        stale_canvas.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(264.0, 297.2),
+        ));
+        popup
+            .frame_with_root(moved_root.clone(), stale_canvas)
+            .assert_no_reveal();
+        let revealed = popup.frame_with_root(moved_root.clone(), settled);
+        assert!(!revealed.child_output.shapes.is_empty());
+        assert_eq!(
+            revealed.commands(),
+            vec![ViewportCommand::Visible(true), ViewportCommand::Focus]
+        );
+
+        // A header drag is free to move the shown popup to another monitor.
+        // Neither a child DPI change nor root movement may re-anchor it.
+        let dragged = popup.frame_with_root(
+            moved_root,
+            observed_input(popup_id(), [-1800.0, 50.0], [440.0, 495.0], 1.0, 1.25),
+        );
+        assert!(
+            dragged.commands().is_empty(),
+            "dragged popup was repositioned: {:?}",
+            dragged.commands()
+        );
+    });
+}
+
+#[test]
+fn native_popup_places_on_three_monitors_and_respects_taskbar_work_areas() {
+    native_test(|| {
+        // Expectations are physical rectangles, calculated independently of
+        // the production clamp. Include both halves of the right monitor.
+        let cases = [
+            ([-1865.0, 85.0], 1.25, [-1840.0, 110.0], [440.0, 495.0]),
+            ([-35.0, 995.0], 1.25, [-450.0, 535.0], [440.0, 495.0]),
+            ([1870.0, 1010.0], 1.5, [1380.0, 434.0], [528.0, 594.0]),
+            ([2760.0, 160.0], 2.0, [2800.0, 200.0], [704.0, 792.0]),
+            ([3760.0, 460.0], 2.0, [3760.0, 500.0], [704.0, 792.0]),
+            ([4430.0, 1360.0], 2.0, [3760.0, 512.0], [704.0, 792.0]),
+        ];
+        for (root_position, scale, expected_position, expected_size) in cases {
+            let popup = NativePopup::new();
+            let root = observed_input(ViewportId::ROOT, root_position, [240.0, 240.0], scale, 1.0);
+            popup.open_on_monitors(root.clone(), 1.0, &THREE_WORK_AREAS);
+            let first = popup.frame_with_root(
+                root.clone(),
+                observed_input(popup_id(), [120.0, 80.0], [528.0, 594.0], 1.5, 1.0),
+            );
+            assert_eq!(first.builder.visible, Some(false));
+            assert_eq!(first.builder.position, None);
+            first.assert_no_reveal();
+            let ready = popup.frame_with_root(
+                root,
+                observed_input(popup_id(), expected_position, expected_size, scale, 1.0),
+            );
+            assert_eq!(
+                ready.commands(),
+                vec![ViewportCommand::Visible(true), ViewportCommand::Focus],
+                "root position {root_position:?}"
+            );
+        }
+    });
+}
+
+#[test]
+fn native_popup_caps_its_size_on_a_small_high_dpi_work_area() {
+    native_test(|| {
+        let popup = NativePopup::new();
+        let root = observed_input(ViewportId::ROOT, [710.0, 510.0], [300.0, 300.0], 2.0, 1.25);
+        popup.open_on_monitors(root.clone(), 1.25, &[[0.0, 0.0, 800.0, 600.0]]);
+        // At 2.5 effective pixels/point the normal 880x990 popup cannot fit.
+        // Keep 20 physical pixels on every side, yielding 304x224 UI points.
+        let first = popup.frame_with_root(
+            root.clone(),
+            observed_input(popup_id(), [100.0, 100.0], [880.0, 990.0], 2.0, 1.25),
+        );
+        assert_eq!(first.builder.min_inner_size, None);
+        first.assert_no_reveal();
+        assert_eq!(
+            first.commands(),
+            vec![
+                ViewportCommand::Visible(false),
+                ViewportCommand::InnerSize(egui::vec2(304.0, 224.0)),
+                ViewportCommand::OuterPosition(egui::pos2(8.0, 8.0)),
+            ]
+        );
+        let ready_input = observed_input(popup_id(), [20.0, 20.0], [760.0, 560.0], 2.0, 1.25);
+        let ready = popup.frame_with_root(root.clone(), ready_input.clone());
+        assert_eq!(
+            ready.commands(),
+            vec![ViewportCommand::Visible(true), ViewportCommand::Focus]
+        );
+
+        let mut scroll = ready_input.clone();
+        scroll.events = vec![
+            Event::PointerMoved(egui::pos2(286.0, 190.0)),
+            Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -10000.0),
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        popup.frame_with_root(root.clone(), scroll);
+        let scrolled = popup.frame_with_root(root.clone(), ready_input.clone());
+        for label in ["Open project folder", "Copy path", "Quit"] {
+            let (bounds, clip_rect) = scrolled
+                .child_output
+                .shapes
+                .iter()
+                .find_map(|clipped| {
+                    if let egui::epaint::Shape::Text(text) = &clipped.shape {
+                        if text.galley.text() == label {
+                            return Some((
+                                text.galley.rect.translate(text.pos.to_vec2()),
+                                clipped.clip_rect,
+                            ));
+                        }
+                    }
+                    None
+                })
+                .unwrap_or_else(|| {
+                    panic!("footer action {label:?} is not visible after scrolling")
+                });
+            assert!(
+                clip_rect.contains_rect(bounds),
+                "footer action {label:?} is clipped: {bounds:?}, clip={clip_rect:?}"
+            );
+        }
+
+        // The top-right Close remains reachable at the capped width.
+        for pressed in [true, false] {
+            let mut close = ready_input.clone();
+            close.events = vec![
+                Event::PointerMoved(egui::pos2(274.0, 26.0)),
+                Event::PointerButton {
+                    pos: egui::pos2(274.0, 26.0),
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            let frame = popup.frame_with_root(root.clone(), close);
+            assert!(!frame.commands().contains(&ViewportCommand::StartDrag));
+        }
+        assert!(!is_open(&popup.ctx));
+    });
+}
+
+#[test]
+fn native_popup_rounding_and_missing_monitor_data_do_not_prevent_reveal() {
+    native_test(|| {
+        let popup = NativePopup::new();
+        let root = observed_input(ViewportId::ROOT, [3600.0, 100.0], [300.0, 300.0], 2.0, 1.25);
+        popup.open_on_monitors(root.clone(), 1.25, &[]);
+        let first = popup.frame_with_root(
+            root.clone(),
+            observed_input(popup_id(), [100.0, 100.0], [440.0, 495.0], 1.0, 1.25),
+        );
+        assert_eq!(first.builder.position, None);
+        assert_eq!(
+            first.commands(),
+            vec![
+                ViewportCommand::Visible(false),
+                ViewportCommand::OuterPosition(egui::pos2(2920.0, 120.0))
+            ]
+        );
+        first.assert_no_reveal();
+        let ready = popup.frame_with_root(
+            root,
+            observed_input(popup_id(), [3650.5, 150.5], [879.5, 990.5], 2.0, 1.25),
+        );
+        assert_eq!(
+            ready.commands(),
+            vec![ViewportCommand::Visible(true), ViewportCommand::Focus]
+        );
+    });
+}
+
+#[test]
 fn native_popup_renders_hidden_then_reveals_once_on_each_open() {
     native_test(|| {
         let popup = NativePopup::new();
         for _ in 0..2 {
-            open_companion_menu(&popup.ctx, egui::pos2(20.0, 20.0));
+            open_companion_menu_with_monitors(&popup.ctx, egui::pos2(20.0, 20.0), None);
             let first = popup.frame(input(popup_id(), false, vec![]));
             assert_eq!(first.builder.visible, Some(false));
             assert_eq!(first.builder.active, Some(false));
@@ -209,7 +615,7 @@ fn native_popup_renders_hidden_then_reveals_once_on_each_open() {
                 let later = popup.frame(input(popup_id(), true, vec![]));
                 assert_eq!(later.builder.visible, None);
                 assert_eq!(later.builder.active, Some(false));
-                later.assert_no_reveal();
+                assert!(later.commands().is_empty());
             }
 
             let mut close = input(popup_id(), true, vec![]);
@@ -349,7 +755,7 @@ fn popup_close_button_does_not_start_a_header_drag() {
 fn embedded_popup_never_reveals_focuses_or_drags_the_root_window() {
     let ctx = egui::Context::default();
     ctx.set_embed_viewports(true);
-    open_companion_menu(&ctx, egui::pos2(20.0, 20.0));
+    open_companion_menu_with_monitors(&ctx, egui::pos2(20.0, 20.0), Some(&THREE_WORK_AREAS));
     let header = egui::pos2(100.0, 26.0);
     for events in [
         vec![],
