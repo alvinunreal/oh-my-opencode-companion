@@ -1434,278 +1434,278 @@ fn render_companion_menu(
                         .id_source("companion-controls-body")
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                    ui.label(egui::RichText::new("Preset target").strong());
-                    let mut view = ctx
-                        .data(|d| d.get_temp::<u8>(egui::Id::new(MENU_SHOW_KNOWN_KEY)))
-                        .unwrap_or(0);
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(&mut view, 0, "Active");
-                        ui.selectable_value(&mut view, 1, "All open");
-                        ui.selectable_value(&mut view, 2, "Known");
-                    });
-                    ctx.data_mut(|d| {
-                        d.insert_temp(egui::Id::new(MENU_SHOW_KNOWN_KEY), view);
-                    });
-
-                    let mut query: String = ctx
-                        .data(|d| d.get_temp(egui::Id::new(MENU_PROJECT_QUERY_KEY)))
-                        .unwrap_or_default();
-                    ui.add(
-                        egui::TextEdit::singleline(&mut query)
-                            .hint_text("Search projects or paths"),
-                    );
-                    ctx.data_mut(|d| {
-                        d.insert_temp(egui::Id::new(MENU_PROJECT_QUERY_KEY), query.clone());
-                    });
-
-                    let mut matches = 0;
-                    egui::ScrollArea::vertical()
-                        .id_source("companion-project-list")
-                        .max_height(104.0)
-                        .show(ui, |ui| {
-                            if view == 2 {
-                                for known in known_projects.iter().rev() {
-                                    let name = project_display_name(&known.cwd);
+                        ui.label(egui::RichText::new("Preset target").strong());
+                        let mut view = ctx
+                            .data(|d| d.get_temp::<u8>(egui::Id::new(MENU_SHOW_KNOWN_KEY)))
+                            .unwrap_or(0);
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut view, 0, "Active");
+                            ui.selectable_value(&mut view, 1, "All open");
+                            ui.selectable_value(&mut view, 2, "Known");
+                        });
+                        ctx.data_mut(|d| {
+                            d.insert_temp(egui::Id::new(MENU_SHOW_KNOWN_KEY), view);
+                        });
+    
+                        let mut query: String = ctx
+                            .data(|d| d.get_temp(egui::Id::new(MENU_PROJECT_QUERY_KEY)))
+                            .unwrap_or_default();
+                        ui.add(
+                            egui::TextEdit::singleline(&mut query)
+                                .hint_text("Search projects or paths"),
+                        );
+                        ctx.data_mut(|d| {
+                            d.insert_temp(egui::Id::new(MENU_PROJECT_QUERY_KEY), query.clone());
+                        });
+    
+                        let mut matches = 0;
+                        egui::ScrollArea::vertical()
+                            .id_source("companion-project-list")
+                            .max_height(104.0)
+                            .show(ui, |ui| {
+                                if view == 2 {
+                                    for known in known_projects.iter().rev() {
+                                        let name = project_display_name(&known.cwd);
+                                        if !query.trim().is_empty()
+                                            && !name.to_lowercase().contains(&query.to_lowercase())
+                                            && !known.cwd.to_lowercase().contains(&query.to_lowercase())
+                                        {
+                                            continue;
+                                        }
+                                        matches += 1;
+                                        let live = project_session_indices(sessions)
+                                            .into_iter()
+                                            .map(|index| &sessions[index])
+                                            .find(|session| session.cwd == known.cwd);
+                                        let label = if live.is_some() { "Open" } else { "Remembered" };
+                                        if ui
+                                            .selectable_label(
+                                                target.cwd == known.cwd,
+                                                format!("{name}  ·  {label}"),
+                                            )
+                                            .on_hover_text(&known.cwd)
+                                            .clicked()
+                                        {
+                                            selected = Some(match live {
+                                                Some(live) => CompanionMenuAction::SelectProject(
+                                                    live.session_id.clone(),
+                                                ),
+                                                None => CompanionMenuAction::SelectKnownProject(
+                                                    known.cwd.clone(),
+                                                ),
+                                            });
+                                        }
+                                        ui.label(
+                                            egui::RichText::new(&known.cwd)
+                                                .size(11.0)
+                                                .color(egui::Color32::GRAY),
+                                        );
+                                    }
+                                }
+                                for index in project_session_indices(sessions) {
+                                    if view == 2 {
+                                        continue;
+                                    }
+                                    let project = &sessions[index];
+                                    let active = session_activity_rank(project) > 0;
+                                    if view == 0 && !active {
+                                        continue;
+                                    }
+                                    let name = project_display_name(&project.cwd);
                                     if !query.trim().is_empty()
                                         && !name.to_lowercase().contains(&query.to_lowercase())
-                                        && !known.cwd.to_lowercase().contains(&query.to_lowercase())
+                                        && !project.cwd.to_lowercase().contains(&query.to_lowercase())
                                     {
                                         continue;
                                     }
                                     matches += 1;
-                                    let live = project_session_indices(sessions)
-                                        .into_iter()
-                                        .map(|index| &sessions[index])
-                                        .find(|session| session.cwd == known.cwd);
-                                    let label = if live.is_some() { "Open" } else { "Remembered" };
+                                    let status = if project.status == "waiting-input" {
+                                        "Needs input"
+                                    } else if active {
+                                        "Working"
+                                    } else {
+                                        "Idle"
+                                    };
                                     if ui
                                         .selectable_label(
-                                            target.cwd == known.cwd,
-                                            format!("{name}  ·  {label}"),
+                                            project.session_id == target.session_id,
+                                            format!("{name}  ·  {status}"),
                                         )
-                                        .on_hover_text(&known.cwd)
+                                        .on_hover_text(&project.cwd)
                                         .clicked()
                                     {
-                                        selected = Some(match live {
-                                            Some(live) => CompanionMenuAction::SelectProject(
-                                                live.session_id.clone(),
-                                            ),
-                                            None => CompanionMenuAction::SelectKnownProject(
-                                                known.cwd.clone(),
-                                            ),
-                                        });
+                                        selected = Some(CompanionMenuAction::SelectProject(
+                                            project.session_id.clone(),
+                                        ));
                                     }
                                     ui.label(
-                                        egui::RichText::new(&known.cwd)
+                                        egui::RichText::new(&project.cwd)
                                             .size(11.0)
                                             .color(egui::Color32::GRAY),
                                     );
                                 }
-                            }
-                            for index in project_session_indices(sessions) {
-                                if view == 2 {
-                                    continue;
-                                }
-                                let project = &sessions[index];
-                                let active = session_activity_rank(project) > 0;
-                                if view == 0 && !active {
-                                    continue;
-                                }
-                                let name = project_display_name(&project.cwd);
-                                if !query.trim().is_empty()
-                                    && !name.to_lowercase().contains(&query.to_lowercase())
-                                    && !project.cwd.to_lowercase().contains(&query.to_lowercase())
-                                {
-                                    continue;
-                                }
-                                matches += 1;
-                                let status = if project.status == "waiting-input" {
-                                    "Needs input"
-                                } else if active {
-                                    "Working"
-                                } else {
-                                    "Idle"
-                                };
-                                if ui
-                                    .selectable_label(
-                                        project.session_id == target.session_id,
-                                        format!("{name}  ·  {status}"),
-                                    )
-                                    .on_hover_text(&project.cwd)
-                                    .clicked()
-                                {
-                                    selected = Some(CompanionMenuAction::SelectProject(
-                                        project.session_id.clone(),
-                                    ));
-                                }
-                                ui.label(
-                                    egui::RichText::new(&project.cwd)
-                                        .size(11.0)
-                                        .color(egui::Color32::GRAY),
-                                );
-                            }
-                        });
-                    if matches == 0 {
+                            });
+                        if matches == 0 {
+                            ui.label(
+                                egui::RichText::new("No matching projects in this view.")
+                                    .color(egui::Color32::GRAY),
+                            );
+                        }
+    
+                        ui.separator();
                         ui.label(
-                            egui::RichText::new("No matching projects in this view.")
-                                .color(egui::Color32::GRAY),
+                            egui::RichText::new(format!(
+                                "Editing: {}",
+                                project_display_name(&target.cwd)
+                            ))
+                            .strong(),
                         );
-                    }
-
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "Editing: {}",
-                            project_display_name(&target.cwd)
-                        ))
-                        .strong(),
-                    );
-                    let mut scope = if ctx.data(|d| {
-                        d.get_temp::<bool>(egui::Id::new(PRESET_SCOPE_GLOBAL_KEY))
-                            .unwrap_or(false)
-                    }) {
-                        PresetScope::Global
-                    } else {
-                        PresetScope::Project
-                    };
-                    ui.horizontal(|ui| {
-                        ui.label("Preset scope:");
-                        ui.selectable_value(&mut scope, PresetScope::Project, "Project");
-                        ui.selectable_value(&mut scope, PresetScope::Global, "Global");
-                    });
-                    ctx.data_mut(|d| {
-                        d.insert_temp(
-                            egui::Id::new(PRESET_SCOPE_GLOBAL_KEY),
-                            scope == PresetScope::Global,
-                        );
-                    });
-
-                    if target.status == "unavailable" {
-                        ui.colored_label(
-                            egui::Color32::LIGHT_RED,
-                            "Selected project closed. Choose an open project to edit presets.",
-                        );
-                    }
-                    if target.status == "offline" {
-                        ui.label(
-                            egui::RichText::new("Remembered project · preset catalog may be stale")
-                                .size(11.0)
-                                .color(egui::Color32::YELLOW),
-                        );
-                    }
-                    if let Some(preset_state) = &target.preset {
-                        let current = match scope {
-                            PresetScope::Project => {
-                                project_current(preset_state).unwrap_or("Inherit")
-                            }
-                            PresetScope::Global => preset_state.global.as_deref().unwrap_or("None"),
+                        let mut scope = if ctx.data(|d| {
+                            d.get_temp::<bool>(egui::Id::new(PRESET_SCOPE_GLOBAL_KEY))
+                                .unwrap_or(false)
+                        }) {
+                            PresetScope::Global
+                        } else {
+                            PresetScope::Project
                         };
-                        ui.add_enabled_ui(!preset_pending, |ui| {
-                            egui::ComboBox::from_id_source("companion-preset-combobox")
-                                .selected_text(current)
-                                .width(290.0)
-                                .show_ui(ui, |ui| {
-                                    if scope == PresetScope::Project
-                                        && ui
-                                            .selectable_label(
-                                                project_current(preset_state).is_none(),
-                                                "Inherit",
-                                            )
-                                            .clicked()
-                                    {
-                                        selected = Some(CompanionMenuAction::SelectPreset(
-                                            PresetMenuAction {
-                                                scope,
-                                                preset: None,
-                                                inherit: true,
-                                            },
-                                        ));
-                                    }
-                                    let choices = match scope {
-                                        PresetScope::Project => project_catalog(preset_state),
-                                        PresetScope::Global => &preset_state.global_available,
-                                    };
-                                    for name in choices {
-                                        let is_active = match scope {
-                                            PresetScope::Project => {
-                                                project_current(preset_state) == Some(name)
-                                            }
-                                            PresetScope::Global => {
-                                                preset_state.global.as_deref() == Some(name)
-                                            }
-                                        };
-                                        if ui.selectable_label(is_active, name).clicked() {
+                        ui.horizontal(|ui| {
+                            ui.label("Preset scope:");
+                            ui.selectable_value(&mut scope, PresetScope::Project, "Project");
+                            ui.selectable_value(&mut scope, PresetScope::Global, "Global");
+                        });
+                        ctx.data_mut(|d| {
+                            d.insert_temp(
+                                egui::Id::new(PRESET_SCOPE_GLOBAL_KEY),
+                                scope == PresetScope::Global,
+                            );
+                        });
+    
+                        if target.status == "unavailable" {
+                            ui.colored_label(
+                                egui::Color32::LIGHT_RED,
+                                "Selected project closed. Choose an open project to edit presets.",
+                            );
+                        }
+                        if target.status == "offline" {
+                            ui.label(
+                                egui::RichText::new("Remembered project · preset catalog may be stale")
+                                    .size(11.0)
+                                    .color(egui::Color32::YELLOW),
+                            );
+                        }
+                        if let Some(preset_state) = &target.preset {
+                            let current = match scope {
+                                PresetScope::Project => {
+                                    project_current(preset_state).unwrap_or("Inherit")
+                                }
+                                PresetScope::Global => preset_state.global.as_deref().unwrap_or("None"),
+                            };
+                            ui.add_enabled_ui(!preset_pending, |ui| {
+                                egui::ComboBox::from_id_source("companion-preset-combobox")
+                                    .selected_text(current)
+                                    .width(290.0)
+                                    .show_ui(ui, |ui| {
+                                        if scope == PresetScope::Project
+                                            && ui
+                                                .selectable_label(
+                                                    project_current(preset_state).is_none(),
+                                                    "Inherit",
+                                                )
+                                                .clicked()
+                                        {
                                             selected = Some(CompanionMenuAction::SelectPreset(
                                                 PresetMenuAction {
                                                     scope,
-                                                    preset: Some(name.clone()),
-                                                    inherit: false,
+                                                    preset: None,
+                                                    inherit: true,
                                                 },
                                             ));
                                         }
-                                    }
-                                });
-                        });
-                        if let Some(message) = preset_state.message.as_deref() {
-                            ui.label(egui::RichText::new(message).size(11.0));
-                        } else if preset_pending {
-                            ui.label("Applying preset…");
+                                        let choices = match scope {
+                                            PresetScope::Project => project_catalog(preset_state),
+                                            PresetScope::Global => &preset_state.global_available,
+                                        };
+                                        for name in choices {
+                                            let is_active = match scope {
+                                                PresetScope::Project => {
+                                                    project_current(preset_state) == Some(name)
+                                                }
+                                                PresetScope::Global => {
+                                                    preset_state.global.as_deref() == Some(name)
+                                                }
+                                            };
+                                            if ui.selectable_label(is_active, name).clicked() {
+                                                selected = Some(CompanionMenuAction::SelectPreset(
+                                                    PresetMenuAction {
+                                                        scope,
+                                                        preset: Some(name.clone()),
+                                                        inherit: false,
+                                                    },
+                                                ));
+                                            }
+                                        }
+                                    });
+                            });
+                            if let Some(message) = preset_state.message.as_deref() {
+                                ui.label(egui::RichText::new(message).size(11.0));
+                            } else if preset_pending {
+                                ui.label("Applying preset…");
+                            }
+                        } else {
+                            ui.label("This project has not published preset state.");
                         }
-                    } else {
-                        ui.label("This project has not published preset state.");
-                    }
-
-                    ui.separator();
-                    let size = ctx.data(|d| {
-                        d.get_temp::<f32>(egui::Id::new(SIZE_KEY))
-                            .unwrap_or(DEFAULT_SIZE)
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Overlay size:");
-                        for (label, preset) in SIZE_PRESETS {
+    
+                        ui.separator();
+                        let size = ctx.data(|d| {
+                            d.get_temp::<f32>(egui::Id::new(SIZE_KEY))
+                                .unwrap_or(DEFAULT_SIZE)
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Overlay size:");
+                            for (label, preset) in SIZE_PRESETS {
+                                if ui
+                                    .selectable_label((size - preset).abs() < 0.5, *label)
+                                    .clicked()
+                                {
+                                    ctx.data_mut(|d| d.insert_temp(egui::Id::new(SIZE_KEY), *preset));
+                                }
+                            }
+                        });
+    
+                        let opening = popup_ctx.data(|data| {
+                            data.get_temp::<bool>(project_open_pending_id(&target.cwd))
+                                .unwrap_or(false)
+                        });
+                        let open_error = popup_ctx.data(|data| {
+                            data.get_temp::<String>(project_open_error_id(&target.cwd))
+                                .unwrap_or_default()
+                        });
+                        ui.horizontal(|ui| {
                             if ui
-                                .selectable_label((size - preset).abs() < 0.5, *label)
+                                .add_enabled(
+                                    !opening,
+                                    egui::Button::new(if opening {
+                                        "Opening…"
+                                    } else {
+                                        "Open project folder"
+                                    }),
+                                )
                                 .clicked()
                             {
-                                ctx.data_mut(|d| d.insert_temp(egui::Id::new(SIZE_KEY), *preset));
+                                start_project_directory_open(popup_ctx, &target.cwd, &target.cwd);
                             }
+                            if ui.button("Copy path").clicked() {
+                                popup_ctx.copy_text(target.cwd.clone());
+                            }
+                            if ui.button("Quit").on_hover_text("Quit Companion").clicked() {
+                                ctx.data_mut(|data| {
+                                    data.insert_temp(egui::Id::new("companion_quit"), true);
+                                });
+                            }
+                        });
+                        if !open_error.is_empty() {
+                            ui.colored_label(egui::Color32::LIGHT_RED, open_error);
                         }
-                    });
-
-                    let opening = popup_ctx.data(|data| {
-                        data.get_temp::<bool>(project_open_pending_id(&target.cwd))
-                            .unwrap_or(false)
-                    });
-                    let open_error = popup_ctx.data(|data| {
-                        data.get_temp::<String>(project_open_error_id(&target.cwd))
-                            .unwrap_or_default()
-                    });
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(
-                                !opening,
-                                egui::Button::new(if opening {
-                                    "Opening…"
-                                } else {
-                                    "Open project folder"
-                                }),
-                            )
-                            .clicked()
-                        {
-                            start_project_directory_open(popup_ctx, &target.cwd, &target.cwd);
-                        }
-                        if ui.button("Copy path").clicked() {
-                            popup_ctx.copy_text(target.cwd.clone());
-                        }
-                        if ui.button("Quit").on_hover_text("Quit Companion").clicked() {
-                            ctx.data_mut(|data| {
-                                data.insert_temp(egui::Id::new("companion_quit"), true);
-                            });
-                        }
-                    });
-                    if !open_error.is_empty() {
-                        ui.colored_label(egui::Color32::LIGHT_RED, open_error);
-                    }
                         });
                 });
         },
