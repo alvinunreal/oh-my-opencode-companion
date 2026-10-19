@@ -1315,6 +1315,22 @@ fn popup_position_for_monitors(
     [pointer[0].clamp(left, right), pointer[1].clamp(top, bottom)]
 }
 
+fn companion_popup_builder(
+    position: egui::Pos2,
+    prepared: bool,
+) -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
+        .with_title("Companion controls")
+        .with_inner_size([POPUP_W, POPUP_H])
+        .with_min_inner_size([POPUP_W, POPUP_H])
+        .with_position(position)
+        .with_decorations(false)
+        .with_resizable(false)
+        .with_always_on_top()
+        .with_visible(prepared)
+        .with_active(prepared)
+}
+
 fn render_companion_menu(
     ctx: &egui::Context,
     sessions: &[SessionInfo],
@@ -1358,16 +1374,7 @@ fn render_companion_menu(
     // no WindowGeometryKey updates, and readable independent menu controls.
     ctx.show_viewport_immediate(
         egui::ViewportId::from_hash_of("companion-controls"),
-        egui::ViewportBuilder::default()
-            .with_title("Companion controls")
-            .with_inner_size([POPUP_W, POPUP_H])
-            .with_min_inner_size([POPUP_W, POPUP_H])
-            .with_position(popup_position)
-            .with_decorations(false)
-            .with_resizable(false)
-            .with_always_on_top()
-            .with_visible(popup_prepared)
-            .with_active(popup_prepared),
+        companion_popup_builder(popup_position, popup_prepared),
         |popup_ctx, viewport_class| {
             let was_focused = ctx.data(|data| {
                 data.get_temp::<bool>(egui::Id::new(MENU_POPUP_FOCUSED_KEY))
@@ -1937,12 +1944,32 @@ mod tests {
     }
 
     #[test]
+    fn popup_is_created_hidden_and_inactive_until_prepared() {
+        let location = egui::pos2(125.0, 80.0);
+        let first = super::companion_popup_builder(location, false);
+        assert_eq!(first.visible, Some(false));
+        assert_eq!(first.active, Some(false));
+        assert_eq!(first.position, Some(location));
+        assert_eq!(first.resizable, Some(false));
+        assert_eq!(
+            first.inner_size,
+            Some(egui::vec2(super::POPUP_W, super::POPUP_H))
+        );
+
+        let ready = super::companion_popup_builder(location, true);
+        assert_eq!(ready.visible, Some(true));
+        assert_eq!(ready.active, Some(true));
+        assert_eq!(ready.position, first.position);
+        assert_eq!(ready.inner_size, first.inner_size);
+    }
+
+    #[test]
     fn native_popup_clamps_near_screen_edges_and_negative_monitor_origins() {
         let screens = [[0.0, 0.0, 1920.0, 1080.0], [-1600.0, 0.0, 0.0, 900.0]];
-        let popup = [382.0, 460.0];
+        let popup = [super::POPUP_W, super::POPUP_H];
         assert_eq!(
             popup_position_for_monitors([1900.0, 1000.0], popup, 1.0, &screens),
-            [1530.0, 612.0]
+            [1560.0, 676.0]
         );
         assert_eq!(
             popup_position_for_monitors([-1580.0, 100.0], popup, 1.0, &screens),
@@ -1950,7 +1977,7 @@ mod tests {
         );
         assert_eq!(
             popup_position_for_monitors([-50.0, 890.0], popup, 1.0, &screens),
-            [-390.0, 432.0]
+            [-360.0, 496.0]
         );
         assert_eq!(
             popup_position_for_monitors([1850.0, 900.0], popup, 2.0, &screens),
