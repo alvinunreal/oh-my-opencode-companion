@@ -1,0 +1,5 @@
+/target/
+/dist/
+/artifacts/
+/*.tar.gz
+/*.zip

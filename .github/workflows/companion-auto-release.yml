@@ -1,0 +1,31 @@
+name: Companion Auto Release
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'src/**'
+      - 'assets/**'
+      - 'animations/**'
+      - 'build.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/companion-auto-release.yml'
+      - '.github/workflows/companion-release.yml'
+      - 'scripts/*.mjs'
+  workflow_dispatch:
+  # Recover a missing/incomplete latest release with a NEW patch, never repair it.
+  schedule:
+    - cron: '17 */6 * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  native_release:
+    uses: ./.github/workflows/companion-release.yml
+    with:
+      automatic: true
+      targets: macos-arm64,macos-x64,linux-x64,linux-arm64,windows-x64
+    permissions:
+      contents: write

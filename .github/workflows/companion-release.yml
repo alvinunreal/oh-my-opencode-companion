@@ -1,0 +1,203 @@
+name: Companion Release
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: false
+        default: ''
+        type: string
+      automatic:
+        description: 'Plan against current default-branch source after acquiring the publication lock'
+        required: false
+        default: false
+        type: boolean
+      targets:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Companion version, for example 0.1.10 (new immutable tag only)'
+        required: true
+        type: string
+      targets:
+        description: 'Comma-separated platforms; partial builds produce artifacts only'
+        required: true
+        default: macos-arm64,macos-x64,linux-x64,linux-arm64,windows-x64
+        type: string
+
+permissions:
+  contents: write
+
+# Planning and publication share one lock for manual and automatic releases.
+# The automatic caller holds no outer lock, so reusable calls cannot deadlock.
+concurrency:
+  group: companion-native-publish
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.inputs.outputs.matrix }}
+      publish: ${{ steps.inputs.outputs.publish }}
+      build: ${{ steps.inputs.outputs.build }}
+      version: ${{ steps.inputs.outputs.version }}
+      source_revision: ${{ steps.source.outputs.source_revision }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Resolve the current branch only AFTER acquiring the workflow lock;
+          # a queued automatic run must not build its stale triggering commit.
+          ref: ${{ inputs.automatic && github.event.repository.default_branch || github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Pin exact native source for every build and the release tag
+        id: source
+        run: echo "source_revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Plan automatic release under the publication lock
+        id: plan
+        if: inputs.automatic
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/plan-companion-release.mjs
+      - name: Validate inputs and select native runners
+        id: inputs
+        env:
+          VERSION: ${{ steps.plan.outputs.next_version || inputs.version }}
+          AUTOMATIC: ${{ inputs.automatic }}
+          RELEASE_NEEDED: ${{ !inputs.automatic || steps.plan.outputs.release_needed == 'true' }}
+          TARGETS: ${{ inputs.targets }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync } from 'node:fs';
+          import { releaseBuildMatrix } from './scripts/check-companion-release.mjs';
+          const matrix = releaseBuildMatrix(process.env.VERSION, process.env.TARGETS);
+          if (process.env.AUTOMATIC === 'true' && matrix.length !== 5) {
+            throw new Error('Automatic releases require all five platforms.');
+          }
+          const build = process.env.RELEASE_NEEDED === 'true';
+          appendFileSync(process.env.GITHUB_OUTPUT,
+            `matrix=${JSON.stringify({ include: matrix })}\nbuild=${build}\npublish=${build && matrix.length === 5}\nversion=${process.env.VERSION}\n`);
+          NODE
+      - name: Refuse existing tags/releases and fail closed on lookup errors
+        if: steps.inputs.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.inputs.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="companion-v$VERSION"
+          refs="$(git ls-remote --tags origin "refs/tags/$tag")"
+          state="$(node scripts/check-companion-release.mjs --tag="$tag")"
+          if [ -n "$refs" ] || [ "$state" != missing ]; then
+            echo "Refusing to replace immutable Companion release/tag: $tag" >&2
+            exit 1
+          fi
+
+  build:
+    name: Native / ${{ matrix.name }}
+    needs: prepare
+    if: needs.prepare.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_revision }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Stamp native crate and lock version
+        run: node scripts/prepare-companion-release.mjs --version="$VERSION"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+      - name: Build companion from root crate
+        run: cargo build --release --locked --target "$TARGET"
+      - name: Package Unix companion
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/$TARGET/release/oh-my-opencode-slim-companion" dist/
+          tar -C dist -czf "oh-my-opencode-slim-companion-v$VERSION-$TARGET.tar.gz" oh-my-opencode-slim-companion
+      - name: Package Windows companion
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/$env:TARGET/release/oh-my-opencode-slim-companion.exe" "dist/oh-my-opencode-slim-companion.exe"
+          Compress-Archive -Path "dist/oh-my-opencode-slim-companion.exe" -DestinationPath "oh-my-opencode-slim-companion-v$env:VERSION-$env:TARGET.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: companion-${{ matrix.name }}
+          path: |
+            *.tar.gz
+            *.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish complete native release
+    needs: [prepare, build]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_revision }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: companion-*
+          path: artifacts
+          merge-multiple: true
+      - name: Tag exact build source and publish without overwriting
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="companion-v$VERSION"
+          refs="$(git ls-remote --tags origin "refs/tags/$tag")"
+          state="$(node scripts/check-companion-release.mjs --tag="$tag")"
+          if [ -n "$refs" ] || [ "$state" != missing ]; then
+            echo "Refusing to replace immutable Companion release/tag: $tag" >&2
+            exit 1
+          fi
+
+          # Release-only commit: every build used the same source and version
+          # stamp. Main need not carry the current release's Cargo version.
+          node scripts/prepare-companion-release.mjs --version="$VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: stamp native $VERSION source"
+          fi
+          git tag -a "$tag" -m "$tag"
+          git push origin "refs/tags/$tag"
+          gh release create "$tag" artifacts/* --verify-tag --latest \
+            --title "Companion v$VERSION" \
+            --notes "Native desktop companion release. Plugin integration is maintained independently in alvinunreal/oh-my-opencode-slim."
+          test "$(node scripts/check-companion-release.mjs --tag="$tag")" = complete

@@ -1,8 +1,8 @@
-# companion/
+# oh-my-opencode-companion
 
 ## Responsibility
 
-Desktop companion application showing active agent GIFs per session. Runs as an accessory macOS app (invisible Dock), displays floating animated windows over projects, and visualizes agent activity through embedded sprite sheets.
+Standalone Rust desktop companion application showing active agent GIFs per session. The crate lives at the repository root, extracted with history from the plugin's former `companion/` directory. Runs as an accessory macOS app (invisible Dock), displays floating animated windows over projects, and visualizes agent activity through embedded sprite sheets.
 
 ## Design
 
@@ -15,13 +15,13 @@ The companion communicates with OpenCode host runtime via file-based state shari
 - Right-click opens an independent native eframe viewport (rather than a tiny `egui::Area` inside the GIF window), using a compact scrollable body and header-only `StartDrag` handle with upper-right close control. The child is pre-rendered hidden and revealed using `ViewportCommand::Visible(true)`/Focus to avoid changing egui 0.29's recreation-prone `active` builder field. Windows opening freezes a physical desktop anchor and enumerates usable monitor areas once through `screen.rs`; the hidden child applies geometry using its own effective pixels-per-point and waits for the native rectangles and drawing area to settle before revealing. This avoids egui-winit 0.29's primary-monitor scaling of builder positions. Size is capped to the work area without a conflicting minimum-size constraint, and placement commands stop after reveal so manual dragging remains independent. The popup has searchable Active / All open / Known project views, full paths and a direct Project/Global preset selector with Inherit. The visible animation session remains independent of the editing target; preset navigation cannot move the root overlay. Known projects are a bounded history from real OpenCode instances, not a filesystem scan. The Rust UI sends typed scoped requests; only TypeScript validates and persists preset changes, including requests routed to remembered but inactive project directories. Pending request IDs fence acknowledgement/completion and rejection when the target manager exits.
 - Project actions stay native and host-independent: open the published session cwd in the platform file manager or copy it through egui clipboard output. The opener is reaped off the UI thread; status is session-scoped, async completion never closes a later menu, and failures reuse the compact Open button instead of increasing menu height.
 - Session state tracks window positions, sizes, and config per project directory using a hidden state file. Windows restoration checks saved rectangles against enumerated monitors (including negative origins) using egui's effective scale (native DPI times UI zoom) and uses a visible anchor when stale or off-screen; fallback does not overwrite the saved preference. The persisted x/y format is unchanged and does not record the scale at capture.
-- Animations are pre-generated as 72-frame JPEG sprite sheets (12x6 grid, 200x200 each frame) from companion/VIDEOS/*.mp4 source videos.
+- Animations are pre-generated as 72-frame JPEG sprite sheets (12x6 grid, 200x200 each frame) from `VIDEOS/*.mp4` source videos.
 
 ## Flow
 
 1. Companion reads OH_MY_OPENCODE_SLIM_COMPANION_SESSION_ID as the process that launched the singleton; display selection itself is activity-driven and may target any published live project.
 2. Acquires a singleton lock via file-based coordination to prevent duplicate instances.
-3. Loads agent sprite sheets embedded at compile time from `companion/animations/` (`include_bytes!` in `gifs.rs`); `state.rs` is the Rust state module, not a data file.
+3. Loads agent sprite sheets embedded at compile time from `animations/` (`include_bytes!` in `src/gifs.rs`); `src/state.rs` is the Rust state module, not a data file.
 4. Renders animated overlays in an Egui window for each active session using that in-process state.
 5. Persistent state stores window geometry, size, config per project directory in `$XDG_DATA_HOME/opencode/storage/oh-my-opencode-slim/companion-state.json` (XDG fallback: `~/.local/share`).
 
@@ -29,8 +29,17 @@ The companion communicates with OpenCode host runtime via file-based state shari
 
 - Acts as a UI visualization layer for OpenCode sessions, complementing the TS plugin.
 - Injected into OpenCode runtime via OH_MY_OPENCODE_SLIM_COMPANION_SESSION_ID environment variable.
-- `companion/VIDEOS/` holds MP4 source media used to generate the runtime JPEG sprite sheets; release binaries embed the sheets from `companion/animations/` via `include_bytes!` and never decode the MP4s.
+- `VIDEOS/` holds MP4 source media used to generate the runtime JPEG sprite sheets; release binaries embed the sheets from `animations/` via `include_bytes!` and never decode the MP4s.
 - Serves as the visual anchor for agent activity indicators in the oh-my-opencode-slim ecosystem.
+
+## Build and release ownership
+
+- Root `Cargo.toml`/`Cargo.lock` build `oh-my-opencode-slim-companion`; native runtime code remains in `src/`.
+- `.github/workflows/companion-ci.yml` checks root-crate formatting/tests on Linux and native tests on Windows, plus dependency-free Node helper tests.
+- `companion-auto-release.yml` requests automatic mode without precomputing a version or holding an outer lock. The reusable release workflow plans with `scripts/plan-companion-release.mjs` only after acquiring the publication lock shared with manual releases. Preparation resolves the current default-branch source and pins its SHA/version for all build/publication jobs. Unchanged complete releases skip both; drift or an incomplete/missing release advances one immutable patch; API failures stop automation.
+- `companion-release.yml` builds the native five-platform matrix, stamps root Cargo versions with `scripts/prepare-companion-release.mjs`, and publishes new `companion-vX.Y.Z` tags/archives only. Partial manual builds remain workflow artifacts. Existing tags/assets cannot be replaced.
+- `scripts/verify-companion-source.mjs` ignores only crate-version drift; `scripts/check-companion-release.mjs` validates supported targets and published archive completeness with fail-closed API lookups. `scripts/*.test.mjs` cover these helpers without network requests.
+- Plugin downloads, manifest/checksum synchronization, and TS lifecycle/configuration remain in `alvinunreal/oh-my-opencode-slim`. There is no plugin synchronization stage in this repository. See `README.md` for build/release/protocol contracts.
 
 ## Shared-state locking
 
